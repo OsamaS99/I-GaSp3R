@@ -9,14 +9,20 @@ from .dpt_head import create_dpt_head
 from .gaussian_head import create_gaussian_head
 
 
-def head_factory(head_type, output_mode, net, has_conf=False):
-    """" build a prediction head for the decoder 
-    """
+def head_factory(head_type, output_mode, net, has_conf=False, use_offsets=False, sh_degree=1, postprocess=None):
+    """Build a prediction head for the decoder."""
     if head_type == 'linear' and output_mode == 'pts3d':
         return LinearPts3d(net, has_conf)
     elif head_type == 'dpt' and output_mode == 'pts3d':
         return create_dpt_head(net, has_conf=has_conf)
-    elif head_type == 'gaussian_head' and output_mode.startswith('pts3d+gaussian'):
-        create_gaussian_head(net)
+    elif head_type == 'gaussian_head' and output_mode == 'pts3d+gaussian':
+        return create_gaussian_head(
+            net=net,
+            output_mode=output_mode,
+            has_conf=has_conf,
+            use_offsets=use_offsets,
+            sh_degree=sh_degree,
+            postprocess=postprocess
+        )
     else:
-        raise NotImplementedError(f"unexpected {head_type=} and {output_mode=}")
+        raise NotImplementedError(f"Unexpected head_type={head_type} and output_mode={output_mode}")

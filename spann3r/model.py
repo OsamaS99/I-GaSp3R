@@ -203,18 +203,21 @@ class SpatialMemory():
     
 
 class Spann3R(nn.Module):
-    def __init__(self, dus3r_name="./checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth", 
-                 use_feat=False, mem_pos_enc=False, memory_dropout=0.15):
+    def __init__(self, dus3r_name="./checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth",
+                 use_feat=False, mem_pos_enc=False, memory_dropout=0.15,
+                 is_gaussian=False):
         super(Spann3R, self).__init__()
-        # config
+        # Config
         self.use_feat = use_feat
         self.mem_pos_enc = mem_pos_enc
 
         # DUSt3R
-        self.dust3r = AsymmetricCroCo3DStereo.from_pretrained(dus3r_name, landscape_only=True, is_gaussian=True)
+        self.dust3r = AsymmetricCroCo3DStereo.from_pretrained(
+            dus3r_name, landscape_only=True, is_gaussian=is_gaussian
+        )
 
         # Memory encoder
-        self.set_memory_encoder(enc_embed_dim=768 if use_feat else 1024, memory_dropout=memory_dropout) 
+        self.set_memory_encoder(enc_embed_dim=768 if use_feat else 1024, memory_dropout=memory_dropout)
         self.set_attn_head()
 
     def set_memory_encoder(self, enc_depth=6, enc_embed_dim=1024, out_dim=1024, enc_num_heads=16, 

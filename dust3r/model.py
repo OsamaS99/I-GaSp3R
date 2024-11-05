@@ -24,7 +24,7 @@ hf_version_number = huggingface_hub.__version__
 assert version.parse(hf_version_number) >= version.parse("0.22.0"), "Outdated huggingface_hub version, please reinstall requirements.txt"
 
 
-def load_model(model_path_or_url, device='cpu', is_gaussian=True, landscape_only=False, verbose=True):
+def load_model(model_path_or_url, device='cpu', is_gaussian=True, landscape_only=False, verbose=False):
     if verbose:
         print('... loading model from', model_path_or_url)
     is_url = urllib.parse.urlparse(model_path_or_url).scheme in ('http', 'https')
@@ -40,12 +40,11 @@ def load_model(model_path_or_url, device='cpu', is_gaussian=True, landscape_only
         args = args.replace(" ", "").replace('landscape_only=True', 'landscape_only=False')
     assert "landscape_only=False" in args
 
-    print(args)
 
     if landscape_only:
         args = args.replace('landscape_only=False', 'landscape_only=True')
     if is_gaussian:
-        args = args.replace('output_mode=\'pts3d\'', 'output_mode=\'pts3d+gaussian+desc24\'')
+        args = args.replace('output_mode=\'pts3d\'', 'output_mode=\'pts3d+gaussian\'')
         args = args.replace('head_type=\'dpt\'', 'head_type=\'gaussian_head\'')
 
     if verbose:

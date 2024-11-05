@@ -103,29 +103,69 @@ def reg_dense_opacities(opacities):
 
 # @MODIFIED
 def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=False, sh_degree=1):
-    
-    
-    fmap = out.permute(0, 2, 3, 1)  # B,H,W,D
-    assert conf_mode is not None, "Confidence mode must be provided for Gaussian head"
-    
-    pts3d, conf, offset, scales, rotations, sh, opacities = torch.split(fmap, [3, 1, 3, 3, 4, 3 * sh_degree, 1], dim=-1)
-    
+    fmap = out.permute(0, 2, 3, 1)  # B, H, W, D
+
+    # Calculate the expected number of channels
+    # pts3d (3) + [conf (1)] + offset (3) + scales (3) + rotations (4) + sh (3 * sh_degree) + opacities (1)
+    num_gaussian_channels = 3 + 3 + 4 + 3 * sh_degree + 1  # Excluding conf
+
+    if conf_mode is not None:
+        expected_channels = 3 + 1 + num_gaussian_channels  # pts3d + conf + gaussian params
+    else:
+        expected_channels = 3 + num_gaussian_channels  # pts3d + gaussian params
+
+    num_channels = fmap.shape[-1]
+    assert num_channels == expected_channels, f"Unexpected number of channels: got {num_channels}, expected {expected_channels}"
+
+    # Split the fmap into components
+    split_sizes = [3]  # pts3d
+    if conf_mode is not None:
+        split_sizes.append(1)  # conf
+
+    split_sizes.extend([
+        3,             # offset
+        3,             # scales
+        4,             # rotations
+        3 * sh_degree, # spherical harmonics
+        1              # opacities
+    ])
+
+    components = torch.split(fmap, split_sizes, dim=-1)
+    idx = 0
+
+    pts3d = components[idx]; idx += 1
+    if conf_mode is not None:
+        conf = components[idx].squeeze(-1); idx += 1
+    else:
+        conf = None
+
+    offset = components[idx]; idx += 1
+    scales = components[idx]; idx += 1
+    rotations = components[idx]; idx += 1
+    sh = components[idx]; idx += 1
+    opacities = components[idx]; idx += 1
+
+    # Apply post-processing to each component
     pts3d = reg_dense_depth(pts3d, mode=depth_mode)
-    conf = reg_dense_conf(conf.squeeze(-1), mode=conf_mode)
+    if conf is not None:
+        conf = reg_dense_conf(conf, mode=conf_mode)
     offset = reg_dense_offsets(offset)
     scales = reg_dense_scales(scales)
     rotations = reg_dense_rotation(rotations)
     sh = reg_dense_sh(sh)
     opacities = reg_dense_opacities(opacities)
 
+    # Prepare the result dictionary
     res = {
         'pts3d': pts3d,
-        'conf': conf,
+        'offset': offset,
         'scales': scales,
         'rotations': rotations,
         'sh': sh,
         'opacities': opacities
     }
+    if conf is not None:
+        res['conf'] = conf
 
     if use_offsets:
         res['means'] = pts3d.detach() + offset

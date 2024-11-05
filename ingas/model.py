@@ -15,28 +15,45 @@ import utils.geometry as geometry
 import utils.sh_utils as sh_utils
 
 class InGaS(Spann3R):
-    def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config = None,
+    def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config=None,
                  use_feat=False, mem_pos_enc=False, memory_dropout=0.15):
-        # Initialize the base Spann3R model
-        super(InGaS, self).__init__(dus3r_name=dust3r_checkpoint_path, use_feat=use_feat,
-                                    mem_pos_enc=mem_pos_enc, memory_dropout=memory_dropout)
-        self.config = config
-
-        # Overwrite dust3r with Gaussian heads
-        self.dust3r = AsymmetricCroCo3DStereo.from_pretrained(
-            pretrained_model_name_or_path=dust3r_checkpoint_path, landscape_only=True, is_gaussian=True
+        # Initialize the base Spann3R model with Gaussian heads
+        super(InGaS, self).__init__(
+            dus3r_name=dust3r_checkpoint_path,
+            use_feat=use_feat,
+            mem_pos_enc=mem_pos_enc,
+            memory_dropout=memory_dropout,
+            is_gaussian=True  # Use Gaussian heads
         )
+        self.config = config
 
         # Load Spann3R weights with strict=False
         state_dict = torch.load(spann3r_checkpoint_path)
+
+        # If the state dictionary is saved under a 'model' key, extract it
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        else:
+            state_dict = state_dict
+
         missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-        print("Missing keys (expected for Gaussian heads):", missing_keys)
+
+        # Filter out Gaussian head keys from missing_keys
+        gaussian_keys = [key for key in missing_keys if 'gaussian' in key]
+        other_missing_keys = [key for key in missing_keys if 'gaussian' not in key]
+
+        if other_missing_keys:
+            print("Warning: Other missing keys:", other_missing_keys)
+
+        print("Missing Gaussian keys (expected):", gaussian_keys)
         print("Unexpected keys (should be empty):", unexpected_keys)
 
         # Freeze all weights except Gaussian heads
-        self.requires_grad_(False)
-        # self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
-        # self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
+        for name, param in self.named_parameters():
+            if 'gaussian' in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
         # Initialize decoder and benchmarker
         self.decoder = pixelsplat_decoder.DecoderSplattingCUDA(
