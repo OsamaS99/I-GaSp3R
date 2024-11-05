@@ -13,7 +13,7 @@ Preprocessing code of scannetpp is from splatam
 '''
 
 class Scannetpp(BaseManyViewDataset):
-    def __init__(self, num_seq=100, num_frames=5, 
+    def __init__(self, num_seq=100, num_frames=7, 
                  min_thresh=10, max_thresh=100, 
                  test_id=None, full_video=False, 
                  kf_every=1, *args, ROOT, **kwargs):
@@ -115,3 +115,7 @@ class Scannetpp(BaseManyViewDataset):
                 instance=osp.split(impath)[1],
             ))
         return views
+    
+
+if __name__ == "__main__":
+    Scannetpp(split='train', ROOT='/home/team13/Workspace/scannetpp/data', resolution=224, transform=None)

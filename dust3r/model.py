@@ -40,17 +40,13 @@ def load_model(model_path_or_url, device='cpu', is_gaussian=True, landscape_only
         args = args.replace(" ", "").replace('landscape_only=True', 'landscape_only=False')
     assert "landscape_only=False" in args
 
-    if 'output_mode' not in args:
-        args = args[:-1] + """, output_mode='pts3d')"""
-
-    if 'head_type' not in args:
-        args = args[:-1] + """, head_type='linear')"""
+    print(args)
 
     if landscape_only:
         args = args.replace('landscape_only=False', 'landscape_only=True')
     if is_gaussian:
-        args = args.replace('output_mode=\'pts3d\'', 'output_mode=\'pts3d+gaussian\'')
-        args = args.replace('head_type=\'linear\'', 'output_mode=\'gaussian_head\'')
+        args = args.replace('output_mode=\'pts3d\'', 'output_mode=\'pts3d+gaussian+desc24\'')
+        args = args.replace('head_type=\'dpt\'', 'head_type=\'gaussian_head\'')
 
     if verbose:
         print(f"instantiating : {args}")

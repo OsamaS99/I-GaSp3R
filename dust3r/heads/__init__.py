@@ -16,7 +16,7 @@ def head_factory(head_type, output_mode, net, has_conf=False):
         return LinearPts3d(net, has_conf)
     elif head_type == 'dpt' and output_mode == 'pts3d':
         return create_dpt_head(net, has_conf=has_conf)
-    elif head_type == 'gaussian_head' and output_mode == 'pts3d+gaussian':
-        create_gaussian_head(net, local_feat_dim=8)
+    elif head_type == 'gaussian_head' and output_mode.startswith('pts3d+gaussian'):
+        create_gaussian_head(net)
     else:
         raise NotImplementedError(f"unexpected {head_type=} and {output_mode=}")

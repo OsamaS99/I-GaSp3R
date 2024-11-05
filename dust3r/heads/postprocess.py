@@ -60,13 +60,6 @@ def reg_dense_conf(x, mode):
     raise ValueError(f'bad {mode=}')
 
 
-def reg_desc(desc, mode):
-    if 'norm' in mode:
-        desc = desc / desc.norm(dim=-1, keepdim=True)
-    else:
-        raise ValueError(f"Unknown desc mode {mode}")
-    return desc
-
 
 # @MODIFIED
 def reg_dense_offsets(xyz, shift=6.0):
@@ -109,22 +102,16 @@ def reg_dense_opacities(opacities):
     return opacities.sigmoid()
 
 # @MODIFIED
-def gaussian_postprocess(out, depth_mode, conf_mode, desc_dim=None, desc_mode='norm', two_confs=False, desc_conf_mode=None, use_offsets=False, sh_degree=1):
+def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=False, sh_degree=1):
     
-    if desc_conf_mode is None:
-        desc_conf_mode = conf_mode
     
     fmap = out.permute(0, 2, 3, 1)  # B,H,W,D
     assert conf_mode is not None, "Confidence mode must be provided for Gaussian head"
-    assert desc_dim is not None, "Descriptor dimension must be provided for Gaussian head"
-    assert two_confs, "Two confidences must be provided for Gaussian head"
     
-    pts3d, conf, desc, desc_conf, offset, scales, rotations, sh, opacities = torch.split(fmap, [3, 1, desc_dim, 1, 3, 3, 4, 3 * sh_degree, 1], dim=-1)
+    pts3d, conf, offset, scales, rotations, sh, opacities = torch.split(fmap, [3, 1, 3, 3, 4, 3 * sh_degree, 1], dim=-1)
     
     pts3d = reg_dense_depth(pts3d, mode=depth_mode)
     conf = reg_dense_conf(conf.squeeze(-1), mode=conf_mode)
-    desc = reg_desc(desc, mode=desc_mode)
-    desc_conf = reg_dense_conf(desc_conf.squeeze(-1), mode=desc_conf_mode)
     offset = reg_dense_offsets(offset)
     scales = reg_dense_scales(scales)
     rotations = reg_dense_rotation(rotations)
@@ -134,8 +121,6 @@ def gaussian_postprocess(out, depth_mode, conf_mode, desc_dim=None, desc_mode='n
     res = {
         'pts3d': pts3d,
         'conf': conf,
-        'desc': desc,
-        'desc_conf': desc_conf,
         'scales': scales,
         'rotations': rotations,
         'sh': sh,

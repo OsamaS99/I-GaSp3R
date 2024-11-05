@@ -11,22 +11,20 @@ import pixelsplat.benchmarker as benchmarker
 import pixelsplat.decoder_splatting_cuda as pixelsplat_decoder
 import utils.compute_ssim as compute_ssim
 from dust3r.model import AsymmetricCroCo3DStereo
-import utils.export as export
 import utils.geometry as geometry
-import utils.loss_mask as loss_mask
 import utils.sh_utils as sh_utils
 
 class InGaS(Spann3R):
-    def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config,
+    def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config = None,
                  use_feat=False, mem_pos_enc=False, memory_dropout=0.15):
         # Initialize the base Spann3R model
-        super(InGaS, self).__init__(dus3r_name=None, use_feat=use_feat,
+        super(InGaS, self).__init__(dus3r_name=dust3r_checkpoint_path, use_feat=use_feat,
                                     mem_pos_enc=mem_pos_enc, memory_dropout=memory_dropout)
         self.config = config
 
         # Overwrite dust3r with Gaussian heads
         self.dust3r = AsymmetricCroCo3DStereo.from_pretrained(
-            dust3r_checkpoint_path, landscape_only=True, is_gaussian=True
+            pretrained_model_name_or_path=dust3r_checkpoint_path, landscape_only=True, is_gaussian=True
         )
 
         # Load Spann3R weights with strict=False
@@ -37,8 +35,8 @@ class InGaS(Spann3R):
 
         # Freeze all weights except Gaussian heads
         self.requires_grad_(False)
-        self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
-        self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
+        # self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
+        # self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
 
         # Initialize decoder and benchmarker
         self.decoder = pixelsplat_decoder.DecoderSplattingCUDA(
@@ -46,10 +44,10 @@ class InGaS(Spann3R):
         )
 
         # Loss criteria
-        if self.config.loss.average_over_mask:
-            self.lpips_criterion = lpips.LPIPS('vgg', spatial=True)
-        else:
-            self.lpips_criterion = lpips.LPIPS('vgg')
+        # if self.config.loss.average_over_mask:
+        #     self.lpips_criterion = lpips.LPIPS('vgg', spatial=True)
+        # else:
+        #     self.lpips_criterion = lpips.LPIPS('vgg')
 
     def forward(self, frames, return_memory=False):
         if self.training:
@@ -157,13 +155,13 @@ class InGaS(Spann3R):
         else:
             lpips_loss = lpips_loss.mean()
 
-        # Total loss
-        loss = self.config.loss.mse_loss_weight * mse_loss + self.config.loss.lpips_loss_weight * lpips_loss
+        # # Total loss
+        # loss = self.config.loss.mse_loss_weight * mse_loss + self.config.loss.lpips_loss_weight * lpips_loss
 
-        # Optionally, include other losses if needed
-        if self.config.loss.dust3r_loss_weight is not None:
-            mast3r_loss = self.mast3r_criterion(batch['frames'][0], batch['frames'][1], preds_all[0][0], preds_all[0][1])[0]
-            loss += self.config.loss.dust3r_loss_weight * mast3r_loss
+        # # Optionally, include other losses if needed
+        # if self.config.loss.dust3r_loss_weight is not None:
+        #     mast3r_loss = self.mast3r_criterion(batch['frames'][0], batch['frames'][1], preds_all[0][0], preds_all[0][1])[0]
+        #     loss += self.config.loss.dust3r_loss_weight * mast3r_loss
 
         # Masked SSIM
         if calculate_ssim:
