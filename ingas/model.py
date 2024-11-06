@@ -61,10 +61,10 @@ class InGaS(Spann3R):
         )
 
         # Loss criteria
-        # if self.config.loss.average_over_mask:
-        #     self.lpips_criterion = lpips.LPIPS('vgg', spatial=True)
-        # else:
-        #     self.lpips_criterion = lpips.LPIPS('vgg')
+        if self.config.loss.average_over_mask:
+            self.lpips_criterion = lpips.LPIPS('vgg', spatial=True)
+        else:
+            self.lpips_criterion = lpips.LPIPS('vgg')
 
     def forward(self, frames, return_memory=False):
         if self.training:
@@ -172,13 +172,13 @@ class InGaS(Spann3R):
         else:
             lpips_loss = lpips_loss.mean()
 
-        # # Total loss
-        # loss = self.config.loss.mse_loss_weight * mse_loss + self.config.loss.lpips_loss_weight * lpips_loss
+        # Total loss
+        loss = self.config.loss.mse_loss_weight * mse_loss + self.config.loss.lpips_loss_weight * lpips_loss
 
-        # # Optionally, include other losses if needed
-        # if self.config.loss.dust3r_loss_weight is not None:
-        #     mast3r_loss = self.mast3r_criterion(batch['frames'][0], batch['frames'][1], preds_all[0][0], preds_all[0][1])[0]
-        #     loss += self.config.loss.dust3r_loss_weight * mast3r_loss
+        # Optionally, include other losses if needed
+        if self.config.loss.dust3r_loss_weight is not None:
+            mast3r_loss = self.mast3r_criterion(batch['frames'][0], batch['frames'][1], preds_all[0][0], preds_all[0][1])[0]
+            loss += self.config.loss.dust3r_loss_weight * mast3r_loss
 
         # Masked SSIM
         if calculate_ssim:
