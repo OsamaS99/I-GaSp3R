@@ -15,15 +15,20 @@ class DecoderSplattingCUDA(torch.nn.Module):
         )
 
     def forward(self, batch, preds, image_shape):
+       
+        # Define target and context views based on spann3r's structure
+        target_views = [batch[0], batch[-1]]
+        context_views = batch[1:-1]
 
-        base_pose = batch['context'][0]['camera_pose']  # [b, 4, 4]
+
+        base_pose = context_views[0]['camera_pose']  # [b, 4, 4]
         inv_base_pose = torch.inverse(base_pose)
 
         extrinsics = torch.stack(
-            [target_view['camera_pose'] for target_view in batch['target']], dim=1
+            [target_view['camera_pose'] for target_view in target_views], dim=1
         )
         intrinsics = torch.stack(
-            [target_view['camera_intrinsics'] for target_view in batch['target']], dim=1
+            [target_view['camera_intrinsics'] for target_view in target_views], dim=1
         )
         intrinsics = normalize_intrinsics(intrinsics, image_shape)[..., :3, :3]
 

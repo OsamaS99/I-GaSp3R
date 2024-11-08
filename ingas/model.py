@@ -1,22 +1,22 @@
 import torch
 import einops
 import lpips
-import torch.nn as nn
 
-from dust3r.losses import L21, ConfLoss, Regr3D
 from spann3r.model import SpatialMemory
 
 from spann3r.model import Spann3R
-import pixelsplat.benchmarker as benchmarker
+from spann3r.loss import Regr3D_t, ConfLoss_t
+
+from dust3r.losses import L21
+
 import pixelsplat.decoder_splatting_cuda as pixelsplat_decoder
 import utils.compute_ssim as compute_ssim
-from dust3r.model import AsymmetricCroCo3DStereo
 import utils.geometry as geometry
 import utils.sh_utils as sh_utils
 
 class InGaS(Spann3R):
     def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config=None,
-                 use_feat=False, mem_pos_enc=False, memory_dropout=0.15):
+                 use_feat=False, mem_pos_enc=False, memory_dropout=0.15, ):
         # Initialize the base Spann3R model with Gaussian heads
         super(InGaS, self).__init__(
             dus3r_name=dust3r_checkpoint_path,
@@ -39,21 +39,20 @@ class InGaS(Spann3R):
         missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
 
         # Filter out Gaussian head keys from missing_keys
-        gaussian_keys = [key for key in missing_keys if 'gaussian' in key]
-        other_missing_keys = [key for key in missing_keys if 'gaussian' not in key]
+        # gaussian_keys = [key for key in missing_keys if 'gaussian' in key]
+        # other_missing_keys = [key for key in missing_keys if 'gaussian' not in key]
 
-        if other_missing_keys:
-            print("Warning: Other missing keys:", other_missing_keys)
+        # if other_missing_keys:
+        #     print("Warning: Other missing keys:", other_missing_keys)
 
-        print("Missing Gaussian keys (expected):", gaussian_keys)
-        print("Unexpected keys (should be empty):", unexpected_keys)
+        # print("Missing Gaussian keys (expected):", gaussian_keys)
+        # print("Unexpected keys (should be empty):", unexpected_keys)
 
         # Freeze all weights except Gaussian heads
-        for name, param in self.named_parameters():
-            if 'gaussian' in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        self.requires_grad_(False)
+        self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
+        self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
+
 
         # Initialize decoder and benchmarker
         self.decoder = pixelsplat_decoder.DecoderSplattingCUDA(
@@ -61,10 +60,16 @@ class InGaS(Spann3R):
         )
 
         # Loss criteria
-        if self.config.loss.average_over_mask:
+        if self.config.average_over_mask:
             self.lpips_criterion = lpips.LPIPS('vgg', spatial=True)
         else:
             self.lpips_criterion = lpips.LPIPS('vgg')
+
+        if config.spann3r_loss_weight is not None:
+            ConfLoss_t(Regr3D_t(L21, norm_mode='avg_dis', fix_first=False), alpha=0.4)
+            self.dust3r.downstream_head1.requires_grad_(True)
+            self.dust3r.downstream_head2.requires_grad_(True)
+
 
     def forward(self, frames, return_memory=False):
         if self.training:
@@ -145,11 +150,13 @@ class InGaS(Spann3R):
         return preds, preds_all
     
     def calculate_loss(self, batch, preds_all, color, mask, apply_mask=True, average_over_mask=True, calculate_ssim=False):
-        target_color = torch.stack([target_view['original_img'] for target_view in batch['target']], dim=1)
+        # Define the target frames as the first and last frames
+        target_color = torch.stack([batch[0]['original_img'], batch[-1]['original_img']], dim=1)
         predicted_color = color
 
         if apply_mask:
             assert mask.sum() > 0, "There are no valid pixels in the mask!"
+            # Apply the mask to both target and predicted colors
             target_color = target_color * mask[..., None, :, :]
             predicted_color = predicted_color * mask[..., None, :, :]
 
@@ -173,12 +180,14 @@ class InGaS(Spann3R):
             lpips_loss = lpips_loss.mean()
 
         # Total loss
-        loss = self.config.loss.mse_loss_weight * mse_loss + self.config.loss.lpips_loss_weight * lpips_loss
+        loss = self.config.mse_loss_weight * mse_loss + self.config.lpips_loss_weight * lpips_loss
 
         # Optionally, include other losses if needed
-        if self.config.loss.dust3r_loss_weight is not None:
-            mast3r_loss = self.mast3r_criterion(batch['frames'][0], batch['frames'][1], preds_all[0][0], preds_all[0][1])[0]
-            loss += self.config.loss.dust3r_loss_weight * mast3r_loss
+        if self.config.spann3r_loss_weight is not None:
+            # Adjust dust3r loss calculation based on the spann3r structure
+            # For spann3r, we're assuming frames are organized in sequence with target as first and last frame
+            spann3r_loss = self.spann3r_criterion.compute_frame_loss(batch, preds_all)
+            loss += self.config.spann3r_criterion * spann3r_loss
 
         # Masked SSIM
         if calculate_ssim:
@@ -191,20 +200,3 @@ class InGaS(Spann3R):
             return loss, mse_loss, lpips_loss, ssim_val
 
         return loss, mse_loss, lpips_loss
-
-    def log_metrics(self, prefix, loss, mse, lpips, ssim=None):
-        values = {
-            f'{prefix}/loss': loss,
-            f'{prefix}/mse': mse,
-            f'{prefix}/psnr': -10.0 * mse.log10(),
-            f'{prefix}/lpips': lpips,
-        }
-
-        if ssim is not None:
-            values[f'{prefix}/ssim'] = ssim
-
-        # Implement logging using your preferred method
-        # For example, using TensorBoard:
-        if self.log_writer is not None:
-            for key, value in values.items():
-                self.log_writer.add_scalar(key, value, self.current_epoch)

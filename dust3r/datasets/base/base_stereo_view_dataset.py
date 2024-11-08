@@ -7,6 +7,7 @@
 import PIL
 import numpy as np
 import torch
+import torchvision
 
 from dust3r.datasets.base.easy_dataset import EasyDataset
 from dust3r.datasets.utils.transforms import ImgNorm
@@ -37,6 +38,7 @@ class BaseStereoViewDataset (EasyDataset):
         self._set_resolutions(resolution)
 
         self.transform = transform
+        self.original_transform = torchvision.transforms.ToTensor()
         if isinstance(transform, str):
             transform = eval(transform)
 
@@ -87,6 +89,7 @@ class BaseStereoViewDataset (EasyDataset):
             # encode the image
             width, height = view['img'].size
             view['true_shape'] = np.int32((height, width))
+            view['original_img'] = self.original_transform(view['img'])
             view['img'] = self.transform(view['img'])
 
             assert 'camera_intrinsics' in view

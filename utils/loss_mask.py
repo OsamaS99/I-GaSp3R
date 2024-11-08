@@ -73,18 +73,28 @@ def calculate_in_frustum_mask(depth_1, intrinsics_1, c2w_1, depth_2, intrinsics_
 
 @torch.no_grad()
 def calculate_loss_mask(batch):
-    '''Calcuate the loss mask for the target views in the batch'''
+    '''Calculate the loss mask for the target views in the spann3r batch'''
 
-    target_depth = torch.stack([target_view['depthmap'] for target_view in batch['target']], dim=1)
-    target_intrinsics = torch.stack([target_view['camera_intrinsics'] for target_view in batch['target']], dim=1)
-    target_c2w = torch.stack([target_view['camera_pose'] for target_view in batch['target']], dim=1)
-    context_depth = torch.stack([context_view['depthmap'] for context_view in batch['context']], dim=1)
-    context_intrinsics = torch.stack([context_view['camera_intrinsics'] for context_view in batch['context']], dim=1)
-    context_c2w = torch.stack([context_view['camera_pose'] for context_view in batch['context']], dim=1)
+    # Define the target views as the first and last frames
+    target_views = [batch[0], batch[-1]]
+    # Define the context views as the middle frames
+    context_views = batch[1:-1]
 
+    # Stack target depth maps, intrinsics, and poses
+    target_depth = torch.stack([target_view['depthmap'] for target_view in target_views], dim=1)
+    target_intrinsics = torch.stack([target_view['camera_intrinsics'] for target_view in target_views], dim=1)
+    target_c2w = torch.stack([target_view['camera_pose'] for target_view in target_views], dim=1)
+
+    # Stack context depth maps, intrinsics, and poses
+    context_depth = torch.stack([context_view['depthmap'] for context_view in context_views], dim=1)
+    context_intrinsics = torch.stack([context_view['camera_intrinsics'] for context_view in context_views], dim=1)
+    context_c2w = torch.stack([context_view['camera_pose'] for context_view in context_views], dim=1)
+
+    # Only take the 3x3 parts of the intrinsics
     target_intrinsics = target_intrinsics[..., :3, :3]
     context_intrinsics = context_intrinsics[..., :3, :3]
 
+    # Calculate the mask using the frustum calculation
     mask = calculate_in_frustum_mask(
         target_depth, target_intrinsics, target_c2w,
         context_depth, context_intrinsics, context_c2w

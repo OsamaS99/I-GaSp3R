@@ -1,6 +1,8 @@
-from spann3r.training import get_args_parser, train
+from ingas.training import get_args_parser, main
+import argparse
 
 if __name__ == '__main__':
-    args = get_args_parser()
-    args = args.parse_args()
-    train(args)
+    parser = argparse.ArgumentParser(description='InGaS Training Script', parents=[get_args_parser()])
+    args = parser.parse_args()
+
+    main(args)
