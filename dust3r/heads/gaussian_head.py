@@ -10,10 +10,9 @@ from models.blocks import Mlp
 class GaussianHead(PixelwiseTaskWithDPT):
     """Model that outputs 3D points and Gaussian parameters, without features (descriptors)"""
 
-    def __init__(self, net, has_conf=False, hooks_idx=None, dim_tokens=None,
-                 num_channels=1, postprocess=None, feature_dim=256, last_dim=32,
+    def __init__(self, net, has_conf=False, hooks_idx=None, dim_tokens=None, postprocess=None, feature_dim=256, last_dim=32,
                  depth_mode=None, conf_mode=None, head_type="regression",
-                 use_offsets=False, sh_degree=1, **kwargs):
+                 use_offsets=True, sh_degree=1, **kwargs):
         # Set num_channels for pts3d (and optional confidence)
         num_pts3d_channels = 3  # For x, y, z coordinates
         if has_conf:
@@ -79,7 +78,7 @@ class GaussianHead(PixelwiseTaskWithDPT):
         return out
 
 
-def create_gaussian_head(net, output_mode, has_conf=False, use_offsets=False, sh_degree=1, postprocess=None):
+def create_gaussian_head(net, has_conf=True, use_offsets=True, sh_degree=1, postprocess=None):
     """
     return PixelwiseTaskWithDPT for given net params
     """

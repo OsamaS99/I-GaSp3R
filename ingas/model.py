@@ -66,7 +66,7 @@ class InGaS(Spann3R):
             self.lpips_criterion = lpips.LPIPS('vgg')
 
         if config.spann3r_loss_weight is not None:
-            ConfLoss_t(Regr3D_t(L21, norm_mode='avg_dis', fix_first=False), alpha=0.4)
+            self.spann3r_criterion = ConfLoss_t(Regr3D_t(L21, norm_mode='avg_dis', fix_first=False), alpha=0.4)
             self.dust3r.downstream_head1.requires_grad_(True)
             self.dust3r.downstream_head2.requires_grad_(True)
 

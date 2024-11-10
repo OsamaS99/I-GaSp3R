@@ -102,7 +102,7 @@ def reg_dense_opacities(opacities):
     return opacities.sigmoid()
 
 # @MODIFIED
-def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=False, sh_degree=1):
+def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree=1):
     fmap = out.permute(0, 2, 3, 1)  # B, H, W, D
 
     # Calculate the expected number of channels
@@ -158,7 +158,6 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=False, sh_degre
     # Prepare the result dictionary
     res = {
         'pts3d': pts3d,
-        'offset': offset,
         'scales': scales,
         'rotations': rotations,
         'sh': sh,

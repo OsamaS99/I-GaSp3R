@@ -168,3 +168,4 @@ cython_debug/
 examples/
 checkpoints/
 output/
+logs/
