@@ -14,8 +14,9 @@ class DecoderSplattingCUDA(torch.nn.Module):
             persistent=False,
         )
 
-    def forward(self, batch, preds, image_shape):
-       
+    def forward(self, batch, pred_means, pred_sh, pred_covariances, pred_opacities, image_shape):
+        
+
         # Define target and context views based on spann3r's structure
         target_views = [batch[0], batch[-1]]
         context_views = batch[1:-1]
@@ -37,12 +38,12 @@ class DecoderSplattingCUDA(torch.nn.Module):
 
         # Stack the predicted data from all views
         # For 'means', the first pred uses 'means', others use 'means_in_other_view'
-        means_list = [preds[0]["means"]] + [pred["means_in_other_view"] for pred in preds[1:]]
+        means_list = pred_means['average']
         means = torch.stack(means_list, dim=1)
         
-        covariances = torch.stack([pred["covariances"] for pred in preds], dim=1)
-        harmonics = torch.stack([pred["sh"] for pred in preds], dim=1)
-        opacities = torch.stack([pred["opacities"] for pred in preds], dim=1)
+        covariances = torch.stack(pred_covariances['average'], dim=1)
+        harmonics = torch.stack(pred_sh['average'], dim=1)
+        opacities = torch.stack(pred_opacities['average'], dim=1)
 
         b, v, _, _ = extrinsics.shape
         near = torch.full((b, v), 0.1, device=means.device)

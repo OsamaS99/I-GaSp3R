@@ -91,7 +91,7 @@ class ResizedDataset (EasyDataset):
 
     def set_epoch(self, epoch):
         # this random shuffle only depends on the epoch
-        rng = np.random.default_rng(seed=epoch+777)
+        rng = np.random.default_rng(seed=777)
 
         # shuffle all indices
         perm = rng.permutation(len(self.dataset))

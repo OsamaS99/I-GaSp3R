@@ -109,6 +109,25 @@ def get_pred_pts3d(gt, pred, use_pose=False):
     return pts3d
 
 
+def get_pred_means(pred, use_pose=False):
+    if 'means' in pred:
+        # pts3d from my camera
+        means = pred['means']
+
+    elif 'means_in_other_view' in pred:
+        # means from the other camera, already transformed
+        assert use_pose is True
+        return pred['means_in_other_view']  # return!
+
+    if use_pose:
+        camera_pose = pred.get('camera_pose')
+        assert camera_pose is not None
+        means = geotrf(camera_pose, means)
+
+    return means
+
+
+
 def find_opt_scaling(gt_pts1, gt_pts2, pr_pts1, pr_pts2=None, fit_mode='weiszfeld_stop_grad', valid1=None, valid2=None):
     assert gt_pts1.ndim == pr_pts1.ndim == 4
     assert gt_pts1.shape == pr_pts1.shape

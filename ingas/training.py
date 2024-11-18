@@ -10,6 +10,9 @@ import numpy as np
 import torch.backends.cudnn as cudnn
 import random
 
+import imageio
+import tempfile
+
 import wandb
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
@@ -34,8 +37,34 @@ class Visualizer:
         self.writer = SummaryWriter(log_dir)
         self.use_wandb = use_wandb
 
+class Visualizer:
+    def __init__(self, log_dir, use_wandb=True):
+        self.writer = SummaryWriter(log_dir)
+        self.use_wandb = use_wandb
+
+from torch.utils.tensorboard import SummaryWriter
+import torch
+import wandb
+import numpy as np
+from torchvision.utils import make_grid
+from PIL import Image
+import io
+
+import io
+import imageio
+import numpy as np
+import torch
+from torchvision.utils import make_grid
+from torch.utils.tensorboard import SummaryWriter
+import wandb
+
+class Visualizer:
+    def __init__(self, log_dir, use_wandb=True):
+        self.writer = SummaryWriter(log_dir)
+        self.use_wandb = use_wandb
+
     def log_images(self, tag, images, step, nrow=8):
-        """Log images to both TensorBoard and W&B"""
+        """Log images to both TensorBoard and W&B as a grid"""
         # Convert images to grid
         if isinstance(images, list):
             images = torch.stack([torch.from_numpy(img) if isinstance(img, np.ndarray) 
@@ -49,6 +78,29 @@ class Visualizer:
         if self.use_wandb:
             wandb.log({tag: wandb.Image(grid)}, step=step)
 
+    def log_gif_images(self, tag, images, step, fps=2):
+        """Log images as a GIF animation to both TensorBoard and W&B"""
+        # Convert images to list of numpy arrays
+        frames = []
+        for img in images:
+            if isinstance(img, torch.Tensor):
+                img = img.cpu().permute(1, 2, 0).numpy()
+                img = ((img + 1.0) / 2.0 * 255).astype(np.uint8)  # Assuming images are normalized [-1,1]
+            elif isinstance(img, np.ndarray):
+                img = img
+            else:
+                raise TypeError("Images should be either torch.Tensor or numpy.ndarray")
+            frames.append(img)
+        
+        # Create GIF in memory
+        gif_bytes = io.BytesIO()
+        imageio.mimsave(gif_bytes, frames, format='gif', fps=fps)
+        gif_bytes.seek(0)
+                
+        # Log to W&B as GIF
+        if self.use_wandb:
+            wandb.log({tag: wandb.Video(gif_bytes, format="gif")}, step=step)
+
     def log_metric(self, tag, value, step):
         """Log scalar metrics to both TensorBoard and W&B"""
         self.writer.add_scalar(tag, value, step)
@@ -61,14 +113,6 @@ class Visualizer:
             point_cloud_data = np.hstack((points, colors))
             wandb.log({tag: wandb.Object3D(point_cloud_data)}, step=step)
         
-        # For TensorBoard, we'll log a different format
-        self.writer.add_embedding(
-            points,
-            tag=f"{tag}_points",
-            global_step=step,
-            metadata_header=['x', 'y', 'z']
-        )
-
     def close(self):
         self.writer.close()
 
@@ -99,11 +143,11 @@ def get_args_parser():
     parser.add_argument('--weight_decay', type=float, default=0.05)
     parser.add_argument('--gradient_clip_val', type=float, default=0.5)
     parser.add_argument('--warmup_epochs', type=int, default=10)
-    parser.add_argument('--eval_freq', type=int, default=1)
-    parser.add_argument('--save_freq', type=int, default=1)
+    parser.add_argument('--eval_freq', type=int, default=5)
+    parser.add_argument('--save_freq', type=int, default=5)
     parser.add_argument('--print_freq', type=int, default=10)
     parser.add_argument('--accum_iter', default=1, type=int)
-    parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--num_workers', default=1, type=int)
 
     # Loss Parameters
     parser.add_argument('--apply_mask', action='store_true')
@@ -160,15 +204,20 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler, a
     model.train()
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = f'Epoch: [{epoch}]'
-
     for batch_idx, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         batch = process_batch(batch, device)
         
         # Forward pass
-        preds, preds_all = model(batch[1:-1])
+        context_views = batch #batch[1:-1]
+        preds, preds_all = model(context_views)
+        pred_means, _ , _, _ = model.get_all_means(batch, preds_all)
+        pred_sh = model.get_all_sh(preds_all)
+        pred_opacities = model.get_all_opacities(preds_all)
+        pred_covariances = model.get_all_covariances(preds_all)
+
         _, _, h, w = batch[0]['img'].shape
 
-        color, _ = model.decoder(batch, preds, (h, w))
+        color, _ = model.decoder(batch, pred_means, pred_sh, pred_covariances, pred_opacities, (h, w))
 
         # Calculate losses
         mask = loss_mask.calculate_loss_mask(batch)
@@ -197,12 +246,21 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler, a
             
             # Log sample images every 100 steps
             if batch_idx % 100 == 0:
-                input_images = [view['img'][0].cpu() for view in batch]
+
+                context_images = [view['img'][0].cpu() for view in context_views]
                 visualizer.log_images(
-                    'train/input_frames',
-                    input_images,
+                    f'train/context_frames',
+                    context_images,
                     global_step,
-                    nrow=len(input_images)
+                    nrow=len(context_images)
+                )
+                target_views = [batch[0], batch[-1]]
+                target_images = [view['img'][0].cpu() for view in target_views]
+                visualizer.log_images(
+                    f'train/target_frames',
+                    target_images,
+                    global_step,
+                    nrow=len(target_images)
                 )
                 
                 rendered_images = [color[0, i].cpu() for i in range(color.shape[1])]
@@ -252,39 +310,48 @@ def validate(model, data_loader, device, epoch, args, visualizer):
 
                 # Log visualizations for first batch only
                 if batch_idx == 0:
-                    # Input frames
-                    input_images = [view['img'][0].cpu() for view in batch]
-                    visualizer.log_images(
-                        f'val/input_frames',
-                        input_images,
+                    # Input frames as GIF
+                    target_views = batch  # [batch[0], batch[-1]]
+                    target_images = [view['img'][0].cpu() for view in target_views]
+                    visualizer.log_gif_images(
+                        f'val/target_frames',
+                        target_images,
                         global_step,
-                        nrow=len(input_images)
+                        fps=2  # Adjust FPS as needed
                     )
 
-                    # Rendered frames
+                    # Rendered frames as GIF
                     rendered_images = [color[0, i].cpu() for i in range(color.shape[1])]
-                    visualizer.log_images(
+                    visualizer.log_gif_images(
                         f'val/rendered_frames',
                         rendered_images,
                         global_step,
-                        nrow=len(rendered_images)
+                        fps=2  # Adjust FPS as needed
                     )
 
                     # Point cloud visualization
+                    images_all = []
+                    pts_all = []
                     for j, view in enumerate(batch):
-                        if 'pts3d' in preds[j]:
-                            depthmap = view['depthmap'][0].cpu().numpy()
-                            mask = depthmap != 0
-                            img = view['img'][0].cpu().permute(1, 2, 0).numpy()
-                            image = img[mask]
-                            pts = preds[j]['pts3d'][0].cpu().numpy()[mask]
-                            
-                            visualizer.log_point_cloud(
-                                f'val/point_cloud_view_{j}',
-                                pts,
-                                (image + 1.0) / 2.0,
-                                global_step
-                            )
+                        img_idx = 0
+                        mask = view['depthmap'][img_idx:img_idx+1].cpu().numpy() != 0
+                        image = view['img'][img_idx:img_idx+1].permute(0, 2, 3, 1).cpu().numpy()[mask].reshape(-1, 3)
+                        
+                        pts = preds[j]['pts3d' if j==0 else 'pts3d_in_other_view'][img_idx:img_idx+1].detach().cpu().numpy()
+                        pts = pts[mask].reshape(-1, 3)
+                        
+                        images_all.append(image)
+                        pts_all.append(pts)
+                    images_all = ((np.concatenate(images_all, axis=0).reshape(-1, 3) + 1.0) / 2.0) * 255
+
+                    pts_all = np.concatenate(pts_all, axis=0).reshape(-1, 3)
+
+                    visualizer.log_point_cloud(
+                        f'val/point_cloud_view',
+                        pts_all,
+                        images_all,
+                        global_step
+                    )
 
             metric_logger.update(
                 loss=loss.item(),
@@ -338,6 +405,7 @@ def main(args):
     dataset_train = build_dataset(args.train_dataset, test=False, num_workers=1, batch_size=1)
     dataset_val = build_dataset(args.val_dataset, test=True, num_workers=1, batch_size=1)
     data_loader_train = dataset_train
+    print(len(data_loader_train))
     data_loader_val = dataset_val
 
     # Initialize optimizer and schedulers
@@ -409,7 +477,7 @@ def main(args):
             if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
                 val_stats = validate(
                     model=model,
-                    data_loader=data_loader_train,
+                    data_loader=data_loader_val,
                     device=device,
                     epoch=epoch,
                     args=args,

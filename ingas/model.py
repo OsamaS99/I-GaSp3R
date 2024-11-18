@@ -5,8 +5,8 @@ import lpips
 from spann3r.model import SpatialMemory
 
 from spann3r.model import Spann3R
-from spann3r.loss import Regr3D_t, ConfLoss_t
-
+from spann3r.loss import Regr3D_t, ConfLoss_t, normalize_pointcloud_t
+from dust3r.inference import get_pred_means
 from dust3r.losses import L21
 
 import pixelsplat.decoder_splatting_cuda as pixelsplat_decoder
@@ -151,7 +151,8 @@ class InGaS(Spann3R):
     
     def calculate_loss(self, batch, preds_all, color, mask, apply_mask=True, average_over_mask=True, calculate_ssim=False):
         # Define the target frames as the first and last frames
-        target_color = torch.stack([batch[0]['original_img'], batch[-1]['original_img']], dim=1)
+        target_views = batch #[batch[0], batch[-1]]
+        target_color = torch.stack([view['img'] for view in target_views], dim=1)
         predicted_color = color
 
         if apply_mask:
@@ -200,3 +201,150 @@ class InGaS(Spann3R):
             return loss, mse_loss, lpips_loss, ssim_val
 
         return loss, mse_loss, lpips_loss
+
+    @staticmethod
+    def get_all_means(gts, preds, norm_mode='avg_dis', fix_first=False, dist_clip=None):
+        """
+        Processes ground truths and predictions to compute left, right, and average 'means' predictions.
+        The average is computed after normalization.
+
+        Args:
+            gts (list): List of ground truth dictionaries for each frame.
+            preds (list): List of predictions for each frame. Each prediction is a list or tuple
+                          containing two dictionaries (left and right head outputs).
+            norm_mode (str, optional): Normalization mode. Defaults to 'avg_dis'.
+            fix_first (bool, optional): Whether to fix the first prediction during normalization. Defaults to False.
+            dist_clip (float, optional): Distance threshold to clip predictions. Points beyond this distance are invalid. Defaults to None.
+
+        Returns:
+            tuple: 
+                - combined_pr_pts (dict): Dictionary containing 'left', 'right', and 'average' 'means' predictions.
+                - pr_factor (various): Normalization factor returned by `normalize_pointcloud_t`.
+                - valids (list): List of valid masks for each frame.
+                - additional_info (dict): Additional information (empty in this implementation).
+        """
+        valids = []
+        pr_pts_l = []
+        pr_pts_r = []
+        num_frames = len(gts)
+
+        for i, gt in enumerate(gts):
+            valid = gt['valid_mask'].clone()
+
+            if dist_clip is not None:
+                dis = gt['means'].norm(dim=-1)
+                valid = valid & (dis <= dist_clip)
+
+            valids.append(valid)
+
+            if i != num_frames - 1:
+                pred_left = get_pred_means(preds[i][0], use_pose=(i != 0))
+                pr_pts_l.append(pred_left)
+
+            if i != 0:
+                pred_right = get_pred_means(preds[i-1][1], use_pose=(i != 0))
+                pr_pts_r.append(pred_right)
+
+        pr_pts = (pr_pts_l, pr_pts_r)
+
+        if norm_mode:
+            pr_pts_normalized, pr_factor = normalize_pointcloud_t(
+                pr_pts, norm_mode, valids, fix_first=fix_first, gt=False
+            )
+            pr_pts_l_normalized, pr_pts_r_normalized = pr_pts_normalized
+            pr_pts_avg_normalized = []
+
+            for i in range(num_frames):
+                if i == 0:
+                    avg_pt = pr_pts_l_normalized[0] if pr_pts_l_normalized else None
+                elif i == num_frames - 1:
+                    avg_pt = pr_pts_r_normalized[-1] if pr_pts_r_normalized else None
+                else:
+                    left_pt = pr_pts_l_normalized[i] if i < len(pr_pts_l_normalized) else None
+                    right_pt = pr_pts_r_normalized[i-1] if (i-1) < len(pr_pts_r_normalized) else None
+                    if left_pt is not None and right_pt is not None:
+                        avg_pt = (left_pt + right_pt) / 2
+                    elif left_pt is not None:
+                        avg_pt = left_pt
+                    elif right_pt is not None:
+                        avg_pt = right_pt
+                    else:
+                        avg_pt = None
+                pr_pts_avg_normalized.append(avg_pt)
+        else:
+            pr_pts_normalized = pr_pts
+            pr_pts_avg_normalized = []
+            for i in range(num_frames):
+                if i == 0:
+                    avg_pt = pr_pts_l[0] if pr_pts_l else None
+                elif i == num_frames - 1:
+                    avg_pt = pr_pts_r[-1] if pr_pts_r else None
+                else:
+                    left_pt = pr_pts_l[i] if i < len(pr_pts_l) else None
+                    right_pt = pr_pts_r[i-1] if (i-1) < len(pr_pts_r) else None
+                    if left_pt is not None and right_pt is not None:
+                        avg_pt = (left_pt + right_pt) / 2
+                    elif left_pt is not None:
+                        avg_pt = left_pt
+                    elif right_pt is not None:
+                        avg_pt = right_pt
+                    else:
+                        avg_pt = None
+                pr_pts_avg_normalized.append(avg_pt)
+            pr_factor = None
+
+        pr_pts_avg_normalized = [pt for pt in pr_pts_avg_normalized if pt is not None]
+
+        combined_pr_pts = {
+            'left': pr_pts_normalized[0] if norm_mode else pr_pts_normalized[0],
+            'right': pr_pts_normalized[1] if norm_mode else pr_pts_normalized[1],
+            'average': pr_pts_avg_normalized
+        }
+
+        return combined_pr_pts, pr_factor, valids, {}
+
+    @staticmethod
+    def get_all_sh(preds):
+        num_frames = len(preds)
+        pr_pts_l = [preds[i][0]['sh'] for i in range(num_frames)]
+        pr_pts_r = [preds[i][1]['sh'] for i in range(num_frames)]
+        pr_pts_avg = [pr_pts_l[0]] + [(pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)] + [pr_pts_r[-1]]
+                
+        combined_pr_pts = {
+            'left': pr_pts_l,
+            'right': pr_pts_r,
+            'average': pr_pts_avg
+        }
+        
+        return combined_pr_pts
+
+
+    @staticmethod
+    def get_all_covariances(preds):
+        num_frames = len(preds)
+        pr_pts_l = [preds[i][0]['covariances'] for i in range(num_frames)]
+        pr_pts_r = [preds[i][1]['covariances'] for i in range(num_frames)]
+        pr_pts_avg = [pr_pts_l[0]] + [(pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)] + [pr_pts_r[-1]]
+        
+        combined_pr_pts = {
+            'left': pr_pts_l,
+            'right': pr_pts_r,
+            'average': pr_pts_avg
+        }
+        
+        return combined_pr_pts
+
+    @staticmethod
+    def get_all_opacities(preds):
+        num_frames = len(preds)
+        pr_pts_l = [preds[i][0]['opacities'] for i in range(num_frames)]
+        pr_pts_r = [preds[i][1]['opacities'] for i in range(num_frames)]
+        pr_pts_avg = [pr_pts_l[0]] + [(pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)] + [pr_pts_r[-1]]
+        
+        combined_pr_pts = {
+            'left': pr_pts_l,
+            'right': pr_pts_r,
+            'average': pr_pts_avg
+        }
+        
+        return combined_pr_pts

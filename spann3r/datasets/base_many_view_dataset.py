@@ -1,53 +1,87 @@
 from dust3r.datasets.base.base_stereo_view_dataset import BaseStereoViewDataset
-
+import numpy as np
 
 
 class BaseManyViewDataset(BaseStereoViewDataset):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, num_frames=5, context_overlap_threshold=0.9, target_overlap_threshold=0.9, **kwargs):
+        self.num_frames = num_frames  # Total number of frames including targets and context
+        self.num_context_frames = self.num_frames - 2  # Subtracting two target frames
+        self.context_overlap_threshold = context_overlap_threshold
+        self.target_overlap_threshold = target_overlap_threshold
+        super().__init__(*args, num_views=self.num_frames, **kwargs)
 
-    def sample_frames(self, img_idxs, rng):
-        num_frames = self.num_frames
-        thresh = int(self.min_thresh + self.train_ratio * (self.max_thresh - self.min_thresh))
-                
-        img_indices = list(range(len(img_idxs)))
-        
-        selected_indices = []
-        
-        initial_valid_range = max(len(img_indices)//num_frames, len(img_indices) - thresh * (num_frames - 1))
-        current_index = rng.choice(img_indices[:initial_valid_range])
-
-        selected_indices.append(current_index)
-        
-        while len(selected_indices) < num_frames:
-            next_min_index = current_index + 1
-            next_max_index = min(current_index + thresh, len(img_indices) - (num_frames - len(selected_indices)))
-            possible_indices = [i for i in range(next_min_index, next_max_index + 1) if i not in selected_indices]
-        
-            if not possible_indices:
-                break
-            
-            current_index = rng.choice(possible_indices)
-            selected_indices.append(current_index)
-        
-        if len(selected_indices) < num_frames:
-            return self.sample_frames(img_idxs, rng)
-
-        selected_img_ids = [img_idxs[i] for i in selected_indices]
-        
-        if rng.choice([True, False]):
-            selected_img_ids.reverse()
-        
-        return selected_img_ids
-    
-
-    def sample_frame_idx(self, img_idxs, rng, full_video=False):
+    def sample_frame_idx(self, img_idxs, sequence, rng, full_video=False):
         if not full_video:
-            img_idxs = self.sample_frames(img_idxs, rng)
+            img_idxs = self.sample_frames(img_idxs, sequence, rng)
         else:
             img_idxs = img_idxs[::self.kf_every]
-        
         return img_idxs
 
+    def sample_frames(self, img_idxs, sequence, rng, attempts=0):
+        max_attempts = 5
+        img_indices = list(range(len(img_idxs)))
+        coverage = self.coverage[sequence]
 
-    
+        # Step 1: Select the first target frame
+        first_target_idx = rng.choice(img_indices)
+        selected_indices = [first_target_idx]
+
+        # Step 2: Select context frames
+        current_idx = first_target_idx
+        for _ in range(self.num_context_frames):
+            valid_context_frames = [
+                idx for idx in img_indices
+                if idx not in selected_indices and
+                coverage[current_idx][idx] > self.context_overlap_threshold
+            ]
+
+            if valid_context_frames:
+                next_idx = rng.choice(valid_context_frames)
+            else:
+                overlaps = [
+                    (idx, coverage[current_idx][idx])
+                    for idx in img_indices if idx not in selected_indices
+                ]
+                if not overlaps:
+                    break
+                next_idx = max(overlaps, key=lambda x: x[1])[0]
+
+            selected_indices.append(next_idx)
+            current_idx = next_idx
+
+        # Step 3: Select the last target frame
+        last_context_idx = selected_indices[-1] if len(selected_indices) > 1 else first_target_idx
+        valid_target_frames = [
+            idx for idx in img_indices
+            if idx not in selected_indices and
+            coverage[last_context_idx][idx] > self.target_overlap_threshold
+        ]
+
+        if valid_target_frames:
+            last_target_idx = rng.choice(valid_target_frames)
+        else:
+            overlaps = [
+                (idx, coverage[last_context_idx][idx])
+                for idx in img_indices if idx not in selected_indices
+            ]
+            if not overlaps:
+                remaining_indices = [idx for idx in img_indices if idx not in selected_indices]
+                if not remaining_indices:
+                    if attempts >= max_attempts:
+                        raise RuntimeError("Unable to sample enough frames with sufficient overlap.")
+                    return self.sample_frames(img_idxs, sequence, rng, attempts=attempts+1)
+                last_target_idx = rng.choice(remaining_indices)
+            else:
+                last_target_idx = max(overlaps, key=lambda x: x[1])[0]
+
+        selected_indices.append(last_target_idx)
+
+        if len(selected_indices) < self.num_frames:
+            if attempts >= max_attempts:
+                raise RuntimeError("Unable to sample enough frames with sufficient overlap.")
+            return self.sample_frames(img_idxs, sequence, rng, attempts=attempts+1)
+
+        # Map indices back to image file names
+        selected_img_ids = [img_idxs[i] for i in selected_indices]
+
+        return selected_img_ids
