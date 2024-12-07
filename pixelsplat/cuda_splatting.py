@@ -181,7 +181,7 @@ def render_cuda_orthographic(
     all_radii = []
     for i in range(b):
         # Set up a tensor for the gradients of the screen-space means.
-        mean_gradients = torch.zeros_like(gaussian_means[i], requires_grad=True)
+        mean_gradients = torch.zeros_like(gaussian_means[i], requires_grad=True) + 0.0
         try:
             mean_gradients.retain_grad()
         except Exception:

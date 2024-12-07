@@ -70,10 +70,10 @@ class BaseStereoViewDataset(EasyDataset):
 
         # Set up the RNG
         if self.seed is not None:
-            self._rng = np.random.default_rng(seed=0)
+            self._rng = np.random.default_rng(seed=self.seed)
         elif not hasattr(self, '_rng'):
             seed = torch.initial_seed()
-            self._rng = np.random.default_rng(seed=0)
+            self._rng = np.random.default_rng(seed=seed)
 
         # Overridden code
         resolution = self._resolutions[ar_idx]

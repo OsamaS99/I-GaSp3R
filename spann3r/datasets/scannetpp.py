@@ -9,6 +9,24 @@ from dust3r.utils.image import imread_cv2
 from .base_many_view_dataset import BaseManyViewDataset
 
 
+def orthonormalize_rotation_np(cam_pose: np.ndarray) -> np.ndarray:
+    """
+    Orthonormalize the rotation component of a 4x4 camera pose matrix to ensure det(R)=1.
+    Uses pure NumPy SVD.
+    """
+    R = cam_pose[:3, :3]  # Extract rotation
+    U, S, Vt = np.linalg.svd(R)  # R = U S V^T
+    R_fixed = U @ Vt
+
+    # Ensure a positive determinant; if negative, flip the last column of U
+    if np.linalg.det(R_fixed) < 0:
+        U[:, -1] *= -1
+        R_fixed = U @ Vt
+
+    cam_pose[:3, :3] = R_fixed
+    return cam_pose
+
+
 class Scannetpp(BaseManyViewDataset):
     def __init__(self, num_seq=100, num_frames=5,
                  test_id=None, full_video=False,
@@ -68,7 +86,7 @@ class Scannetpp(BaseManyViewDataset):
 
                 valid_sequences.append(sequence)
 
-            self.scene_list = [valid_sequences[3]]
+            self.scene_list = valid_sequences
             print(f"Found {len(self.scene_list)} valid scenes in split {self.split}")
             if scenes_with_no_good_frames:
                 print(f"Excluded scenes with no good frames: {scenes_with_no_good_frames}")
@@ -120,11 +138,6 @@ class Scannetpp(BaseManyViewDataset):
         frame_file = osp.join(input_raw_folder, "dslr", "train_test_lists.json")
         with open(frame_file, "r") as f:
             train_test_list = json.load(f)
-
-        # Camera Metadata
-        cams_metadata_path = osp.join(input_processed_folder, 'dslr', 'nerfstudio', 'transforms_undistorted.json')
-        with open(cams_metadata_path, "r") as f:
-            cams_metadata = json.load(f)
 
         # Load the nerfstudio/transforms.json file to check whether each image is blurry
         nerfstudio_transforms_path = osp.join(input_raw_folder, 'dslr', 'nerfstudio', 'transforms.json')
@@ -195,6 +208,12 @@ class Scannetpp(BaseManyViewDataset):
         imgs_idxs = deque(imgs_idxs)
 
         filepath_index_mapping = {frame["file_path"]: index for index, frame in enumerate(frame_meta_data)}
+        P = np.array([
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1]]
+        ).astype(np.float32)
 
         views = []
         while len(imgs_idxs) > 0:
@@ -214,9 +233,10 @@ class Scannetpp(BaseManyViewDataset):
 
             camera_pose = np.array(frame_metadata["transform_matrix"], dtype=np.float32)
             # Convert from OpenGL to OpenCV coordinate system
-            camera_pose[2, :] *= -1
-            camera_pose = camera_pose[np.array([1, 0, 2, 3]), :]
-            camera_pose[0:3, 1:3] *= -1
+            
+            camera_pose = P @ camera_pose @ P.T
+
+            # camera_pose = orthonormalize_rotation_np(camera_pose)
 
             # Perform cropping and resizing
             rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(

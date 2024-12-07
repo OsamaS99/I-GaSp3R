@@ -28,7 +28,7 @@ class GaussianHead(PixelwiseTaskWithDPT):
         self.postprocess = postprocess  # Assign the postprocess function
 
         # Initialize Gaussian DPT
-        gaussian_num_channels = 3 + 3 + 4 + 3 * sh_degree + 1  # Total channels for Gaussian parameters
+        gaussian_num_channels = 3 + 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Total channels for Gaussian parameters
         self.gaussian_dpt = PixelwiseTaskWithDPT(
             num_channels=gaussian_num_channels, feature_dim=feature_dim, last_dim=last_dim,
             hooks_idx=hooks_idx, dim_tokens=dim_tokens, depth_mode=depth_mode,
@@ -39,9 +39,9 @@ class GaussianHead(PixelwiseTaskWithDPT):
         final_conv_layer = self.gaussian_dpt.dpt.head[-1]
         splits_and_inits = [
             (3, 0.001, 0.001),     # 3D mean offsets
-            (3, 0.00003, -7.0),    # Scales
+            (3, 1.0, 0.0),    # Scales
             (4, 1.0, 0.0),         # Rotations
-            (3 * sh_degree, 1.0, 0.0),  # Spherical Harmonics
+            (3 * ((sh_degree + 1) ** 2), 1.0, 0.0),  # Spherical Harmonics
             (1, 1.0, -2.0)         # Opacity
         ]
         start_channels = 0
@@ -78,7 +78,7 @@ class GaussianHead(PixelwiseTaskWithDPT):
         return out
 
 
-def create_gaussian_head(net, has_conf=True, use_offsets=True, sh_degree=1, postprocess=None):
+def create_gaussian_head(net, has_conf=True, use_offsets=True, sh_degree=2, postprocess=None):
     """
     return PixelwiseTaskWithDPT for given net params
     """

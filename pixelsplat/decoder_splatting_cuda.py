@@ -14,40 +14,14 @@ class DecoderSplattingCUDA(torch.nn.Module):
             persistent=False,
         )
 
-    def forward(self, batch, pred_means, pred_sh, pred_covariances, pred_opacities, image_shape):
+    def forward(self, extrinsics, intrinsics, means, harmonics, covariances, opacities, image_shape):
         
 
-        # Define target and context views based on spann3r's structure
-        target_views = [batch[0], batch[-1]]
-        context_views = batch[1:-1]
-
-
-        base_pose = context_views[0]['camera_pose']  # [b, 4, 4]
-        inv_base_pose = torch.inverse(base_pose)
-
-        extrinsics = torch.stack(
-            [target_view['camera_pose'] for target_view in target_views], dim=1
-        )
-        intrinsics = torch.stack(
-            [target_view['camera_intrinsics'] for target_view in target_views], dim=1
-        )
         intrinsics = normalize_intrinsics(intrinsics, image_shape)[..., :3, :3]
 
-        # Rotate the ground truth extrinsics into the coordinate system used
-        extrinsics = inv_base_pose[:, None, :, :] @ extrinsics
-
-        # Stack the predicted data from all views
-        # For 'means', the first pred uses 'means', others use 'means_in_other_view'
-        means_list = pred_means['average']
-        means = torch.stack(means_list, dim=1)
-        
-        covariances = torch.stack(pred_covariances['average'], dim=1)
-        harmonics = torch.stack(pred_sh['average'], dim=1)
-        opacities = torch.stack(pred_opacities['average'], dim=1)
-
         b, v, _, _ = extrinsics.shape
-        near = torch.full((b, v), 0.1, device=means.device)
-        far = torch.full((b, v), 1000.0, device=means.device)
+        near = torch.full((b, v), 0.01, device=means.device)
+        far = torch.full((b, v), 100.0, device=means.device)
 
         color = render_cuda(
             rearrange(extrinsics, "b v i j -> (b v) i j"),

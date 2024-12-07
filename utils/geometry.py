@@ -1,5 +1,9 @@
 import einops
 import torch
+from math import isqrt
+from e3nn.o3 import matrix_to_angles, wigner_D
+
+
 
 # --- Intrinsics Transformations ---
 
@@ -169,3 +173,58 @@ def unproject_depth(depth, intrinsics, c2w):
     world_points = camera_space_to_world_space(camera_points, c2w)  # (..., h, w, 3)
 
     return world_points
+
+
+def adjust_extrinsic_matrix(E, scale):
+    """
+    Adjusts the extrinsic matrix by scaling the translation component.
+
+    Args:
+        E (numpy.ndarray or torch.Tensor): The extrinsic matrix to adjust.
+        scale (float): The scaling factor applied to the point clouds.
+
+    Returns:
+        numpy.ndarray or torch.Tensor: The adjusted extrinsic matrix.
+    """
+    # Assuming E is a 4x4 matrix
+    E_adj = E.clone()  # Clone to avoid modifying the original
+    E_adj[..., :3, 3] /= scale.view(-1)  # Scale the translation vector for each item in the batch
+    return E_adj
+
+
+def get_scale_multiplier(
+        intrinsics,
+        pixel_size,
+        multiplier = 0.1,
+    ):
+        xy_multipliers = multiplier * einops.einsum(
+            intrinsics[..., :2, :2].inverse(),
+            pixel_size,
+            "... i j, j -> ... i",
+        )
+
+        return xy_multipliers.sum(dim=-1)
+
+
+
+def rotate_sh(
+    sh_coefficients,
+    rotations,
+):
+    device = sh_coefficients.device
+    dtype = sh_coefficients.dtype
+
+    *_, n = sh_coefficients.shape
+    alpha, beta, gamma = matrix_to_angles(rotations)
+    result = []
+    for degree in range(isqrt(n)):
+        with torch.device(device):
+            sh_rotations = wigner_D(degree, alpha, beta, gamma).type(dtype)
+        sh_rotated = einops.einsum(
+            sh_rotations,
+            sh_coefficients[..., degree**2 : (degree + 1) ** 2],
+            "... i j, ... j -> ... i",
+        )
+        result.append(sh_rotated)
+
+    return torch.cat(result, dim=-1)

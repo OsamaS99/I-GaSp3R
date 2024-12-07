@@ -76,7 +76,7 @@ def reg_dense_scales(scales):
     """
     Apply an activation function to the offsets so that they are small at initialization
     """
-    scales = scales.exp()
+    # scales = scales.sigmoid()
     return scales
 
 # @MODIFIED
@@ -84,7 +84,8 @@ def reg_dense_rotation(rotations, eps=1e-8):
     """
     Apply PixelSplat's rotation normalization
     """
-    return rotations / (rotations.norm(dim=-1, keepdim=True) + eps)
+    # rotations = rotations / (rotations.norm(dim=-1, keepdim=True) + eps)
+    return rotations 
 
 # @MODIFIED
 def reg_dense_sh(sh):
@@ -99,7 +100,7 @@ def reg_dense_opacities(opacities):
     """
     Apply PixelSplat's opacity postprocessing
     """
-    return opacities.sigmoid()
+    return opacities
 
 # @MODIFIED
 def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree=1):
@@ -107,7 +108,7 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
 
     # Calculate the expected number of channels
     # pts3d (3) + [conf (1)] + offset (3) + scales (3) + rotations (4) + sh (3 * sh_degree) + opacities (1)
-    num_gaussian_channels = 3 + 3 + 4 + 3 * sh_degree + 1  # Excluding conf
+    num_gaussian_channels = 3 + 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Excluding conf
 
     if conf_mode is not None:
         expected_channels = 3 + 1 + num_gaussian_channels  # pts3d + conf + gaussian params
@@ -126,8 +127,8 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
         3,             # offset
         3,             # scales
         4,             # rotations
-        3 * sh_degree, # spherical harmonics
-        1              # opacities
+        3 * ((sh_degree + 1) ** 2), # spherical harmonics
+        1              # opacities 
     ])
 
     components = torch.split(fmap, split_sizes, dim=-1)
@@ -167,7 +168,7 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
         res['conf'] = conf
 
     if use_offsets:
-        res['means'] = pts3d.detach() + offset
+        res['means'] = pts3d
     else:
         res['means'] = pts3d.detach()
 

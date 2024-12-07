@@ -3,7 +3,7 @@ import numpy as np
 
 
 class BaseManyViewDataset(BaseStereoViewDataset):
-    def __init__(self, *args, num_frames=5, context_overlap_threshold=0.9, target_overlap_threshold=0.9, **kwargs):
+    def __init__(self, *args, num_frames=5, context_overlap_threshold=0.8, target_overlap_threshold=0.6, **kwargs):
         self.num_frames = num_frames  # Total number of frames including targets and context
         self.num_context_frames = self.num_frames - 2  # Subtracting two target frames
         self.context_overlap_threshold = context_overlap_threshold
