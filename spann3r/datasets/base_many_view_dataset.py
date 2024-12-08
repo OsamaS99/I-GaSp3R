@@ -3,7 +3,7 @@ import numpy as np
 
 
 class BaseManyViewDataset(BaseStereoViewDataset):
-    def __init__(self, *args, num_frames=5, context_overlap_threshold=0.8, target_overlap_threshold=0.6, **kwargs):
+    def __init__(self, *args, num_frames=6, context_overlap_threshold=0.7, target_overlap_threshold=0.7, **kwargs):
         self.num_frames = num_frames  # Total number of frames including targets and context
         self.num_context_frames = self.num_frames - 2  # Subtracting two target frames
         self.context_overlap_threshold = context_overlap_threshold
@@ -18,6 +18,8 @@ class BaseManyViewDataset(BaseStereoViewDataset):
         return img_idxs
 
     def sample_frames(self, img_idxs, sequence, rng, attempts=0):
+        self.context_overlap_threshold = self.train_ratio
+        self.target_overlap_threshold = self.train_ratio
         max_attempts = 5
         img_indices = list(range(len(img_idxs)))
         coverage = self.coverage[sequence]

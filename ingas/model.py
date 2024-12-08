@@ -16,6 +16,15 @@ import utils.sh_utils as sh_utils
 from utils.geometry import adjust_extrinsic_matrix, rotate_sh, build_covariance, get_scale_multiplier
 
 
+def reg_dense_offsets(xyz, shift=6.0):
+    """
+    Apply an activation function to the offsets so that they are small at initialization
+    """
+    d = xyz.norm(dim=-1, keepdim=True)
+    xyz = xyz / d.clip(min=1e-8)
+    offsets = xyz * (torch.exp(d - shift) - torch.exp(torch.zeros_like(d) - shift))
+    return offsets
+
 def reg_dense_scales(scales):
     """
     Apply a sigmoid activation to scale offsets so that they are within (0, 1).
@@ -59,9 +68,9 @@ class InGaS(Spann3R):
         self.load_state_dict(state_dict, strict=False)
 
         # Freeze DUSt3R backbone, except Gaussian heads
-        self.dust3r.requires_grad_(False)
-        self.dust3r.downstream_head1.requires_grad_(True)
-        self.dust3r.downstream_head2.requires_grad_(True)
+        self.requires_grad_(False)
+        self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
+        self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
 
         # Initialize decoder
         self.decoder = pixelsplat_decoder.DecoderSplattingCUDA(
@@ -178,7 +187,7 @@ class InGaS(Spann3R):
         """
         # Extract context and target views
         context_views = batch[1:-1]
-        target_views = [batch[1]] + [batch[-1]]
+        target_views = [batch[1]] + [batch[len(batch) // 2]] + [batch[-1]]
         _, preds_all = self.forward(context_views)
 
         # Compute necessary parameters
@@ -187,6 +196,7 @@ class InGaS(Spann3R):
         pred_opacities = self.get_all_opacities(preds_all)
         pred_rotations = self.get_all_rotations(preds_all)
         pred_scales = self.get_all_scales(preds_all)
+        pred_offsets = self.get_all_offsets(preds_all)
 
         # Get height and width from the first context view
         _, _, h, w = context_views[0]['img'].shape
@@ -212,7 +222,7 @@ class InGaS(Spann3R):
 
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
         multiplier = get_scale_multiplier(context_intrinsics, pixel_size, 0.5)
-        means = combined_pr_pts["average"]
+        means = combined_pr_pts["average"] + pred_offsets["average"]
         scales = scales * multiplier[..., None, None, None]
         covariances = build_covariance(scales, rotations)
         covariances = context_camera_rotations[..., None, None, :, :] @ covariances @ \
@@ -349,6 +359,26 @@ class InGaS(Spann3R):
         }
 
         return combined_pr_pts
+    
+    @staticmethod
+    def get_all_offsets(preds):
+        num_frames = len(preds)
+        pr_pts_l = [preds[i][0]['offsets'] for i in range(num_frames)]
+        pr_pts_r = [preds[i][1]['offsets'] for i in range(num_frames)]
+        pr_pts_avg = [pr_pts_l[0]] + [
+            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
+        ] + [pr_pts_r[-1]]
+
+        pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
+        pr_pts_avg = reg_dense_offsets(pr_pts_avg)
+        combined_pr_pts = {
+            'left': pr_pts_l,
+            'right': pr_pts_r,
+            'average': pr_pts_avg
+        }
+
+        return combined_pr_pts
+
 
     @staticmethod
     def get_all_scales(preds):

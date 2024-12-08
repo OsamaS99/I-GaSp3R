@@ -102,9 +102,9 @@ def get_args_parser():
 
     # Training Hyperparameters
     parser.add_argument('--batch_size', default=1, type=int)
-    parser.add_argument('--epochs', default=10000, type=int)
-    parser.add_argument('--lr', type=float, default=5e-5)
-    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--lr', type=float, default=1e-5)
+    parser.add_argument('--weight_decay', type=float, default=0.05)
     parser.add_argument('--gradient_clip_val', type=float, default=0.5)
     parser.add_argument('--warmup_epochs', type=int, default=10)
     parser.add_argument('--eval_freq', type=int, default=5)
@@ -117,7 +117,7 @@ def get_args_parser():
     parser.add_argument('--apply_mask', action='store_false')
     parser.add_argument('--average_over_mask', action='store_false')
     parser.add_argument('--mse_loss_weight', type=float, default=1.0)
-    parser.add_argument('--lpips_loss_weight', type=float, default=0.1)
+    parser.add_argument('--lpips_loss_weight', type=float, default=0.05)
     parser.add_argument('--spann3r_loss_weight', type=float, default=None)
 
     # Distributed training
@@ -348,6 +348,17 @@ def main(args):
         try:
             if hasattr(data_loader_train.dataset, 'set_epoch'):
                 data_loader_train.dataset.set_epoch(epoch)
+            max_ratio = 0.75
+            min_ratio = 0.3
+
+            if args.epochs > 1:
+                current_epoch = epoch - start_epoch
+                progress = current_epoch / (args.epochs - 1)
+                ratio = max_ratio - progress * (max_ratio - min_ratio)
+            else:
+                ratio = min_ratio  # or max_ratio, depending on your preference
+
+            data_loader_train.dataset.set_ratio(ratio)
 
             train_stats = train_one_epoch(
                 model=model,
@@ -360,16 +371,16 @@ def main(args):
                 visualizer=visualizer if args.rank == 0 else None
             )
 
-            val_stats = {}
-            if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
-                val_stats = validate(
-                    model=model,
-                    data_loader=data_loader_val,
-                    device=device,
-                    epoch=epoch,
-                    args=args,
-                    visualizer=visualizer if args.rank == 0 else None
-                )
+            # val_stats = {}
+            # if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
+            #     val_stats = validate(
+            #         model=model,
+            #         data_loader=data_loader_val,
+            #         device=device,
+            #         epoch=epoch,
+            #         args=args,
+            #         visualizer=visualizer if args.rank == 0 else None
+            #     )
 
             # Update learning rate
             scheduler.step()
@@ -398,8 +409,8 @@ def main(args):
                     'lr': optimizer.param_groups[0]['lr'],
                     **{f'train_{k}': v for k, v in train_stats.items()}
                 }
-                if val_stats:
-                    epoch_summary.update({f'val_{k}': v for k, v in val_stats.items()})
+                # if val_stats:
+                #     epoch_summary.update({f'val_{k}': v for k, v in val_stats.items()})
 
                 if args.use_wandb:
                     wandb.log(epoch_summary)

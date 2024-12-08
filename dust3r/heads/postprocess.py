@@ -66,10 +66,10 @@ def reg_dense_offsets(xyz, shift=6.0):
     """
     Apply an activation function to the offsets so that they are small at initialization
     """
-    d = xyz.norm(dim=-1, keepdim=True)
-    xyz = xyz / d.clip(min=1e-8)
-    offsets = xyz * (torch.exp(d - shift) - torch.exp(torch.zeros_like(d) - shift))
-    return offsets
+    # d = xyz.norm(dim=-1, keepdim=True)
+    # xyz = xyz / d.clip(min=1e-8)
+    # offsets = xyz * (torch.exp(d - shift) - torch.exp(torch.zeros_like(d) - shift))
+    return xyz
 
 # @MODIFIED
 def reg_dense_scales(scales):
@@ -103,7 +103,7 @@ def reg_dense_opacities(opacities):
     return opacities
 
 # @MODIFIED
-def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree=1):
+def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree=2):
     fmap = out.permute(0, 2, 3, 1)  # B, H, W, D
 
     # Calculate the expected number of channels
@@ -162,13 +162,14 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
         'scales': scales,
         'rotations': rotations,
         'sh': sh,
-        'opacities': opacities
+        'opacities': opacities,
+        'offsets': offset
     }
     if conf is not None:
         res['conf'] = conf
 
     if use_offsets:
-        res['means'] = pts3d
+        res['means'] = pts3d.detach()
     else:
         res['means'] = pts3d.detach()
 
