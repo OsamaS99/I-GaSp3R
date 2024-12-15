@@ -226,20 +226,12 @@ class InGaS(Spann3R):
     def calculate_loss(self, context_views, target_views, preds_all, predicted_color, splat_freq, predicted_opacity, mask,
                     apply_mask=True, average_over_mask=True, calculate_ssim=False, epsilon=1e-8, use_frequency_weighting=True):
         """
-        Calculate the losses (MSE, LPIPS, optional Spann3r loss, SSIM) with optional frequency-based weighting.
-        
-        Shapes:
-        - predicted_color, target_color: (b, v, c, h, w)
-        - splat_freq: (b, v, c, h, w)
-        - mask: (b, v, h, w)
-        After flattening (b, v) -> (b*v):
-        - flattened_color, flattened_target_color: (b*v, c, h, w)
-        - flattened_mask: (b*v, h, w), need to broadcast to (b*v, 1, h, w)
-        - flattened_weight (if used): (b*v, c, h, w)
+        Calculate the losses with optional frequency-based weighting.
+        Here, we first aggregate splat_freq over its 'c' dimension to match the color images (which have c=3).
         """
 
-        # Extract target colors
-        target_color = torch.stack([view['original_img'] for view in target_views], dim=1)  # (b, v, c, h, w)
+        # Extract target colors: (b, v, c, h, w)
+        target_color = torch.stack([view['original_img'] for view in target_views], dim=1)
 
         # Apply mask if requested
         if apply_mask:
@@ -247,53 +239,58 @@ class InGaS(Spann3R):
             predicted_color = predicted_color * mask[..., None, :, :]   # (b, v, c, h, w)
             predicted_opacity = predicted_opacity * mask[..., None]      # (b, v, h, w)
 
-        # Rearrange tensors for loss computations
-        # Flatten over b and v dimensions
-        flattened_color = einops.rearrange(predicted_color, 'b v c h w -> (b v) c h w')
-        flattened_target_color = einops.rearrange(target_color, 'b v c h w -> (b v) c h w')
-        flattened_mask = einops.rearrange(mask, 'b v h w -> (b v) h w')  # (b*v, h, w)
+        # Flatten (b,v) -> (b*v)
+        flattened_color = einops.rearrange(predicted_color, 'b v c h w -> (b v) c h w')  # (b*v,c,h,w)
+        flattened_target_color = einops.rearrange(target_color, 'b v c h w -> (b v) c h w')  # (b*v,c,h,w)
+        flattened_mask = einops.rearrange(mask, 'b v h w -> (b v) h w')  # (b*v,h,w)
 
         if use_frequency_weighting:
-            # Compute frequency-based weights
-            # splat_freq: (b, v, c, h, w)
-            weight_map = 1.0 / (splat_freq + epsilon)  # (b, v, c, h, w)
-            weight_map[splat_freq == 0] = 0.0
-            flattened_weight = einops.rearrange(weight_map, 'b v c h w -> (b v) c h w')  # (b*v, c, h, w)
+            # splat_freq: (b, v, c_freq, h, w)
+            # Aggregate over c_freq dimension
+            splat_freq_mean = splat_freq.to(torch.float).mean(dim=2)  # now (b, v, h, w)
+
+            # Flatten along b and v
+            flattened_splat_freq = einops.rearrange(splat_freq_mean, 'b v h w -> (b v) h w')  # (b*v,h,w)
+
+            # Compute weights: 1/(freq+epsilon), and zero out where freq=0
+            weight_map = 1.0 / (flattened_splat_freq + epsilon)
+            weight_map[flattened_splat_freq == 0] = 0.0  # (b*v,h,w)
+
         else:
-            # No frequency weighting: use ones
-            # Matches shape of flattened_color for easy multiplication
-            flattened_weight = torch.ones_like(flattened_color, dtype=flattened_color.dtype, device=flattened_color.device)
+            # No frequency weighting: just use mask if available
+            # Create a uniform weight map of ones
+            weight_map = torch.ones((flattened_color.shape[0], flattened_color.shape[2], flattened_color.shape[3]),
+                                    dtype=flattened_color.dtype,
+                                    device=flattened_color.device)  # (b*v,h,w)
             if apply_mask:
-                # If masking, apply the mask to weights too
-                # mask: (b*v, h, w) -> expand to (b*v, 1, h, w) for broadcast
-                flattened_weight = flattened_weight * flattened_mask[:, None, ...]  # (b*v, c, h, w)
+                weight_map = weight_map * flattened_mask  # (b*v,h,w)
+            # This will broadcast similarly during multiplication
 
         # ============ MSE Loss ============
-        rgb_l2_loss = (flattened_color - flattened_target_color) ** 2  # (b*v, c, h, w)
-        # If we're using frequency weighting or not, at this point flattened_weight is defined.
+        rgb_l2_loss = (flattened_color - flattened_target_color) ** 2  # (b*v,c,h,w)
+
         if apply_mask and average_over_mask and not use_frequency_weighting:
-            # Original behavior without frequency weighting: just use mask for averaging
-            numerator = (rgb_l2_loss * flattened_mask[:, None, ...]).sum()  # sum over (b*v,c,h,w)
+            # Original mask-only averaging
+            numerator = (rgb_l2_loss * flattened_mask[:, None, ...]).sum()
             denominator = flattened_mask.sum() + epsilon
             mse_loss = numerator / denominator
         else:
-            # With frequency weighting (or no averaging special case), rely on flattened_weight
-            numerator = (rgb_l2_loss * flattened_weight).sum()
-            denominator = flattened_weight.sum() + epsilon
+            # With frequency weighting or simplified approach
+            # (b*v,c,h,w) * (b*v,1,h,w) via broadcasting
+            numerator = (rgb_l2_loss * weight_map[:, None, ...]).sum()
+            denominator = (weight_map[:, None, ...]).sum() + epsilon
             mse_loss = numerator / denominator
 
         # ============ LPIPS Loss ============
-        lpips_loss_map = self.lpips_criterion(flattened_target_color, flattened_color, normalize=True)  # (b*v, c, h, w)
+        lpips_loss_map = self.lpips_criterion(flattened_target_color, flattened_color, normalize=True)  # (b*v,c,h,w)
 
         if apply_mask and average_over_mask and not use_frequency_weighting:
-            # Original mask-based averaging without frequency weighting
             numerator = (lpips_loss_map * flattened_mask[:, None, ...]).sum()
             denominator = flattened_mask.sum() + epsilon
             lpips_loss = numerator / denominator
         else:
-            # With frequency weighting or simplified averaging
-            numerator = (lpips_loss_map * flattened_weight).sum()
-            denominator = flattened_weight.sum() + epsilon
+            numerator = (lpips_loss_map * weight_map[:, None, ...]).sum()
+            denominator = (weight_map[:, None, ...]).sum() + epsilon
             lpips_loss = numerator / denominator
 
         # Combine weighted losses
@@ -303,10 +300,8 @@ class InGaS(Spann3R):
         # ============ Opacity Regularization ============
         opacity_reg_loss = None
         if self.config.opacity_reg_weight is not None:
-            # Opacity regularization: can consider only masked regions if desired
-            # It doesn't depend on frequency weighting directly.
             if apply_mask:
-                masked_opacity = predicted_opacity * mask[..., None]  # (b, v, h, w)
+                masked_opacity = predicted_opacity * mask[..., None]  # (b,v,h,w)
                 opacity_reg_loss = torch.abs(masked_opacity).mean()
             else:
                 opacity_reg_loss = torch.abs(predicted_opacity).mean()
@@ -315,21 +310,20 @@ class InGaS(Spann3R):
         # ============ Optional Spann3r Loss ============
         spann3r_loss = None
         if self.config.spann3r_loss_weight is not None:
-            # Compute Spann3r loss (assumed scalar)
             spann3r_loss, _, _ = self.spann3r_criterion.compute_frame_loss(context_views, preds_all)
             loss += self.config.spann3r_loss_weight * spann3r_loss
 
         # ============ SSIM (Optional) ============
         ssim_val = None
         if calculate_ssim:
-            ssim_map = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=False)  # (b*v, c, h, w)
+            ssim_map = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=False)  # (b*v,c,h,w)
             if apply_mask and average_over_mask and not use_frequency_weighting:
                 numerator = (ssim_map * flattened_mask[:, None, ...]).sum()
                 denominator = flattened_mask.sum() + epsilon
                 ssim_val = numerator / denominator
             else:
-                numerator = (ssim_map * flattened_weight).sum()
-                denominator = flattened_weight.sum() + epsilon
+                numerator = (ssim_map * weight_map[:, None, ...]).sum()
+                denominator = (weight_map[:, None, ...]).sum() + epsilon
                 ssim_val = numerator / denominator
 
         return loss, mse_loss, lpips_loss, opacity_reg_loss, spann3r_loss, ssim_val
