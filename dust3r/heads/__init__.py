@@ -9,7 +9,7 @@ from .dpt_head import create_dpt_head
 from .gaussian_head import create_gaussian_head
 
 
-def head_factory(head_type, output_mode, net, has_conf=True, use_offsets=True, sh_degree=1, postprocess=None):
+def head_factory(head_type, output_mode, net, has_conf=True, sh_degree=1, postprocess=None):
     """Build a prediction head for the decoder."""
     if head_type == 'linear' and output_mode == 'pts3d':
         return LinearPts3d(net, has_conf)
@@ -19,7 +19,6 @@ def head_factory(head_type, output_mode, net, has_conf=True, use_offsets=True, s
         return create_gaussian_head(
             net=net,
             has_conf=has_conf,
-            use_offsets=use_offsets,
             sh_degree=sh_degree,
             postprocess=postprocess
         )

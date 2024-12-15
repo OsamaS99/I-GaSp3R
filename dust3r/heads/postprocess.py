@@ -62,16 +62,6 @@ def reg_dense_conf(x, mode):
 
 
 # @MODIFIED
-def reg_dense_offsets(xyz, shift=6.0):
-    """
-    Apply an activation function to the offsets so that they are small at initialization
-    """
-    # d = xyz.norm(dim=-1, keepdim=True)
-    # xyz = xyz / d.clip(min=1e-8)
-    # offsets = xyz * (torch.exp(d - shift) - torch.exp(torch.zeros_like(d) - shift))
-    return xyz
-
-# @MODIFIED
 def reg_dense_scales(scales):
     """
     Apply an activation function to the offsets so that they are small at initialization
@@ -103,12 +93,12 @@ def reg_dense_opacities(opacities):
     return opacities
 
 # @MODIFIED
-def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree=2):
+def gaussian_postprocess(out, depth_mode, conf_mode, sh_degree=1):
     fmap = out.permute(0, 2, 3, 1)  # B, H, W, D
 
     # Calculate the expected number of channels
     # pts3d (3) + [conf (1)] + offset (3) + scales (3) + rotations (4) + sh (3 * sh_degree) + opacities (1)
-    num_gaussian_channels = 3 + 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Excluding conf
+    num_gaussian_channels = 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Excluding conf
 
     if conf_mode is not None:
         expected_channels = 3 + 1 + num_gaussian_channels  # pts3d + conf + gaussian params
@@ -124,7 +114,6 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
         split_sizes.append(1)  # conf
 
     split_sizes.extend([
-        3,             # offset
         3,             # scales
         4,             # rotations
         3 * ((sh_degree + 1) ** 2), # spherical harmonics
@@ -140,7 +129,6 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
     else:
         conf = None
 
-    offset = components[idx]; idx += 1
     scales = components[idx]; idx += 1
     rotations = components[idx]; idx += 1
     sh = components[idx]; idx += 1
@@ -150,7 +138,6 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
     pts3d = reg_dense_depth(pts3d, mode=depth_mode)
     if conf is not None:
         conf = reg_dense_conf(conf, mode=conf_mode)
-    offset = reg_dense_offsets(offset)
     scales = reg_dense_scales(scales)
     rotations = reg_dense_rotation(rotations)
     sh = reg_dense_sh(sh)
@@ -163,14 +150,8 @@ def gaussian_postprocess(out, depth_mode, conf_mode, use_offsets=True, sh_degree
         'rotations': rotations,
         'sh': sh,
         'opacities': opacities,
-        'offsets': offset
     }
     if conf is not None:
         res['conf'] = conf
-
-    if use_offsets:
-        res['means'] = pts3d.detach()
-    else:
-        res['means'] = pts3d.detach()
 
     return res
