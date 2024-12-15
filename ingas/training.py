@@ -185,9 +185,6 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler, a
     header = f'Epoch: [{epoch}]'
 
     for batch_idx, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
-        if len(batch) < (args.num_context_frames + args.num_target_frames):
-            # Skip if batch doesn't have enough frames
-            continue
 
         batch = process_batch(batch, device)
         context_views = batch[:len(batch)//2]
