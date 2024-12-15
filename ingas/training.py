@@ -140,9 +140,6 @@ def get_args_parser():
     parser.add_argument('--wandb_run_name', type=str, default='InGaS_Demo')
     parser.add_argument('--no_wandb', action='store_false', dest='use_wandb', default=True, help='Disable W&B logging')
 
-    # Scene specification
-    parser.add_argument('--num_context_frames', type=int, default=2, help='Number of context frames')
-    parser.add_argument('--num_target_frames', type=int, default=1, help='Number of target frames')
 
     return parser
 
