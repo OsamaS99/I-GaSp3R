@@ -18,12 +18,13 @@ class DecoderSplattingCUDA(torch.nn.Module):
         
 
         intrinsics = normalize_intrinsics(intrinsics, image_shape)[..., :3, :3]
-
         b, v, _, _ = extrinsics.shape
+        b, c, h, w, _= opacities.shape
+
         near = torch.full((b, v), 0.01, device=means.device)
         far = torch.full((b, v), 100.0, device=means.device)
 
-        color = render_cuda(
+        color, freq = render_cuda(
             rearrange(extrinsics, "b v i j -> (b v) i j"),
             rearrange(intrinsics, "b v i j -> (b v) i j"),
             rearrange(near, "b v -> (b v)"),
@@ -50,4 +51,5 @@ class DecoderSplattingCUDA(torch.nn.Module):
             ),
         )
         color = rearrange(color, "(b v) c h w -> b v c h w", b=b, v=v)
-        return color, None
+        freq = rearrange(freq, "(b v) (c h w) -> b v c h w", b=b, v=v, c=c, h=h, w=w)
+        return color, freq

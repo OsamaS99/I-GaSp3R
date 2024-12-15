@@ -12,7 +12,7 @@ class GaussianHead(PixelwiseTaskWithDPT):
 
     def __init__(self, net, has_conf=False, hooks_idx=None, dim_tokens=None, postprocess=None, feature_dim=256, last_dim=32,
                  depth_mode=None, conf_mode=None, head_type="regression",
-                 use_offsets=True, sh_degree=1, **kwargs):
+                 sh_degree=1, **kwargs):
         # Set num_channels for pts3d (and optional confidence)
         num_pts3d_channels = 3  # For x, y, z coordinates
         if has_conf:
@@ -21,14 +21,13 @@ class GaussianHead(PixelwiseTaskWithDPT):
         super().__init__(num_channels=num_pts3d_channels, feature_dim=feature_dim, last_dim=last_dim,
                          hooks_idx=hooks_idx, dim_tokens=dim_tokens, depth_mode=depth_mode,
                          postprocess=None, conf_mode=conf_mode, head_type=head_type)
-        self.use_offsets = use_offsets
         self.sh_degree = sh_degree
         self.depth_mode = depth_mode
         self.conf_mode = conf_mode
         self.postprocess = postprocess  # Assign the postprocess function
 
         # Initialize Gaussian DPT
-        gaussian_num_channels = 3 + 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Total channels for Gaussian parameters
+        gaussian_num_channels = 3 + 4 + 3 * ((sh_degree + 1) ** 2) + 1  # Total channels for Gaussian parameters
         self.gaussian_dpt = PixelwiseTaskWithDPT(
             num_channels=gaussian_num_channels, feature_dim=feature_dim, last_dim=last_dim,
             hooks_idx=hooks_idx, dim_tokens=dim_tokens, depth_mode=depth_mode,
@@ -38,7 +37,6 @@ class GaussianHead(PixelwiseTaskWithDPT):
         # Initialize Gaussian parameters
         final_conv_layer = self.gaussian_dpt.dpt.head[-1]
         splits_and_inits = [
-            (3, 0.001, 0.001),     # 3D mean offsets
             (3, 1.0, 0.0),    # Scales
             (4, 1.0, 0.0),         # Rotations
             (3 * ((sh_degree + 1) ** 2), 1.0, 0.0),  # Spherical Harmonics
@@ -72,13 +70,12 @@ class GaussianHead(PixelwiseTaskWithDPT):
                 out,
                 depth_mode=self.depth_mode,
                 conf_mode=self.conf_mode,
-                use_offsets=self.use_offsets,
                 sh_degree=self.sh_degree
             )
         return out
 
 
-def create_gaussian_head(net, has_conf=True, use_offsets=True, sh_degree=2, postprocess=None):
+def create_gaussian_head(net, has_conf=True, sh_degree=1, postprocess=None):
     """
     return PixelwiseTaskWithDPT for given net params
     """
@@ -101,5 +98,4 @@ def create_gaussian_head(net, has_conf=True, use_offsets=True, sh_degree=2, post
                         depth_mode=net.depth_mode,
                         conf_mode=net.conf_mode,
                         head_type='regression',
-                        use_offsets=use_offsets,
                         sh_degree=sh_degree)

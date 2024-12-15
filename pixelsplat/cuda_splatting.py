@@ -86,9 +86,10 @@ def render_cuda(
 
     all_images = []
     all_radii = []
+    all_freqs = []
     for i in range(b):
         # Set up a tensor for the gradients of the screen-space means.
-        mean_gradients = torch.zeros_like(gaussian_means[i], requires_grad=True)
+        mean_gradients = torch.zeros_like(gaussian_means[i], requires_grad=True) + 0.0
         try:
             mean_gradients.retain_grad()
         except Exception:
@@ -112,7 +113,7 @@ def render_cuda(
 
         row, col = torch.triu_indices(3, 3)
 
-        image, radii = rasterizer(
+        image, radii, freq = rasterizer(
             means3D=gaussian_means[i],
             means2D=mean_gradients,
             shs=shs[i] if use_sh else None,
@@ -122,7 +123,9 @@ def render_cuda(
         )
         all_images.append(image)
         all_radii.append(radii)
-    return torch.stack(all_images)
+        all_freqs.append(freq)
+    return torch.stack(all_images), torch.stack(all_freqs)
+
 
 
 def render_cuda_orthographic(
@@ -179,6 +182,7 @@ def render_cuda_orthographic(
 
     all_images = []
     all_radii = []
+    all_freqs = []
     for i in range(b):
         # Set up a tensor for the gradients of the screen-space means.
         mean_gradients = torch.zeros_like(gaussian_means[i], requires_grad=True) + 0.0
@@ -205,7 +209,7 @@ def render_cuda_orthographic(
 
         row, col = torch.triu_indices(3, 3)
 
-        image, radii = rasterizer(
+        image, radii, freq = rasterizer(
             means3D=gaussian_means[i],
             means2D=mean_gradients,
             shs=shs[i] if use_sh else None,
@@ -215,7 +219,8 @@ def render_cuda_orthographic(
         )
         all_images.append(image)
         all_radii.append(radii)
-    return torch.stack(all_images)
+        all_freqs.append(freq)
+    return torch.stack(all_images), torch.stack(all_freqs)
 
 
 DepthRenderingMode = Literal["depth", "disparity", "relative_disparity", "log"]

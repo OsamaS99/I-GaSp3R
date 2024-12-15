@@ -1,56 +1,51 @@
 import torch
 import einops
 import lpips
-import torch.nn.functional as F
 
-from spann3r.model import SpatialMemory
-from spann3r.model import Spann3R
+from spann3r.model import SpatialMemory, Spann3R
 from spann3r.loss import Regr3D_t, ConfLoss_t, normalize_pointcloud_t
-from dust3r.inference import get_pred_means
+from dust3r.inference import get_pred_pts3d
 from dust3r.losses import L21
 from dust3r.utils.geometry import inv, geotrf
 
 import pixelsplat.decoder_splatting_cuda as pixelsplat_decoder
 import utils.compute_ssim as compute_ssim
 import utils.sh_utils as sh_utils
-from utils.geometry import adjust_extrinsic_matrix, rotate_sh, build_covariance, get_scale_multiplier
+from utils.geometry import get_scale_multiplier, build_covariance, adjust_extrinsic_matrix, rotate_sh
 
-
-def reg_dense_offsets(xyz, shift=6.0):
-    """
-    Apply an activation function to the offsets so that they are small at initialization
-    """
-    d = xyz.norm(dim=-1, keepdim=True)
-    xyz = xyz / d.clip(min=1e-8)
-    offsets = xyz * (torch.exp(d - shift) - torch.exp(torch.zeros_like(d) - shift))
-    return offsets
 
 def reg_dense_scales(scales):
-    """
-    Apply a sigmoid activation to scale offsets so that they are within (0, 1).
-    """
-    scales = scales.sigmoid()
-    return scales
+    """Regularize scales into a [0,1] range and then map to desired range later."""
+    return scales.sigmoid()
 
 def reg_dense_opacities(opacities):
-    """
-    Apply a sigmoid activation to opacities so that they are within (0, 1).
-    """
-    opacities = opacities.sigmoid()
-    return opacities
+    """Regularize opacities to a [0,1] range."""
+    return opacities.sigmoid()
 
 def reg_dense_rotation(rotations, eps=1e-8):
-    """
-    Normalize rotations to have unit length.
-    """
-    rotations = rotations / (rotations.norm(dim=-1, keepdim=True) + eps)
-    return rotations
+    """Normalize rotations to unit length."""
+    return rotations / (rotations.norm(dim=-1, keepdim=True) + eps)
+
+class CustomMeanFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor1, tensor2):
+        # Save tensors for backward pass
+        ctx.save_for_backward(tensor1, tensor2)
+        # Compute forward pass: (tensor1 + tensor2) / 2
+        return (tensor1 + tensor2) / 2
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Retrieve saved tensors
+        tensor1, tensor2 = ctx.saved_tensors
+        # Return gradients without dividing by 2
+        return grad_output, grad_output
+
 
 
 class InGaS(Spann3R):
     def __init__(self, spann3r_checkpoint_path, dust3r_checkpoint_path, config=None,
                  use_feat=False, mem_pos_enc=False, memory_dropout=0.15):
-        # Initialize the Spann3R model with Gaussian heads
         super(InGaS, self).__init__(
             dus3r_name=dust3r_checkpoint_path,
             use_feat=use_feat,
@@ -67,39 +62,31 @@ class InGaS(Spann3R):
 
         self.load_state_dict(state_dict, strict=False)
 
-        # Freeze DUSt3R backbone, except Gaussian heads
-        self.requires_grad_(False)
-        self.dust3r.downstream_head1.gaussian_dpt.dpt.requires_grad_(True)
-        self.dust3r.downstream_head2.gaussian_dpt.dpt.requires_grad_(True)
+        # Freeze dust3r except heads
+        self.dust3r.requires_grad_(False)
+        self.dust3r.downstream_head1.requires_grad_(True)
+        self.dust3r.downstream_head2.requires_grad_(True)
 
         # Initialize decoder
         self.decoder = pixelsplat_decoder.DecoderSplattingCUDA(
             background_color=[0.0, 0.0, 0.0]
         )
 
-        # LPIPS criterion
-        if self.config is not None and self.config.average_over_mask:
+        # LPIPS loss
+        if self.config and self.config.average_over_mask:
             self.lpips_criterion = lpips.LPIPS(net='vgg', spatial=True)
         else:
             self.lpips_criterion = lpips.LPIPS(net='vgg')
+        
+        self.lpips_criterion.requires_grad_(False)
 
-        if self.config is not None and self.config.spann3r_loss_weight is not None:
-            self.spann3r_criterion = ConfLoss_t(Regr3D_t(L21, norm_mode='avg_dis', fix_first=False), alpha=0.4)
-            self.dust3r.downstream_head1.requires_grad_(True)
-            self.dust3r.downstream_head2.requires_grad_(True)
+        if self.config and self.config.spann3r_loss_weight is not None:
+            self.spann3r_criterion = ConfLoss_t(Regr3D_t(L21, norm_mode='avg_dis', fix_first=False), alpha=0.1)
 
     def forward(self, frames, return_memory=False):
         """
-        Forward pass through the model.
-        
-        Args:
-            frames (list): A list of frames/dicts with 'img', 'original_img', 'pts3d', 'valid_mask', 'camera_pose', and optionally 'camera_intrinsics'.
-            return_memory (bool): If True, return the spatial memory.
-
-        Returns:
-            preds (list): List of predictions for each frame.
-            preds_all (list): Detailed predictions including paired frames.
-            sp_mem (SpatialMemory, optional): Returned if return_memory is True.
+        Forward pass of the InGaS model.
+        frames: list of views (dicts)
         """
         if self.training:
             sp_mem = SpatialMemory(self.norm_q, self.norm_k, self.norm_v, mem_dropout=self.mem_dropout, attn_thresh=0)
@@ -108,6 +95,7 @@ class InGaS(Spann3R):
 
         feat1, feat2, pos1, pos2, shape1, shape2 = None, None, None, None, None, None
         feat_k1, feat_k2 = None, None
+
         preds = None
         preds_all = []
 
@@ -120,7 +108,7 @@ class InGaS(Spann3R):
                 view1, view2, feat1, feat2, pos1, pos2, shape1, shape2
             )
 
-            # Memory readout
+            # Memory read
             if feat_k2 is not None:
                 feat_fuse = sp_mem.memory_read(feat_k2, res=True)
             else:
@@ -133,12 +121,12 @@ class InGaS(Spann3R):
             feat_k1 = self.encode_feat_key(feat1, dec1[-1], 1)
             feat_k2 = self.encode_feat_key(feat2, dec2[-1], 2)
 
-            # Regress point maps
+            # Regress pointmaps
             with torch.cuda.amp.autocast(enabled=False):
                 res1 = self.downstream_head(dec1, shape1, 1)
                 res2 = self.downstream_head(dec2, shape2, 2)
 
-            # Initialize SH from images
+            # Residual SH initialization
             new_sh1 = torch.zeros_like(res1['sh'])
             new_sh2 = torch.zeros_like(res2['sh'])
             new_sh1[..., 0] = sh_utils.RGB2SH(einops.rearrange(view1['original_img'], 'b c h w -> b h w c'))
@@ -146,22 +134,21 @@ class InGaS(Spann3R):
             res1['sh'] = res1['sh'] + new_sh1
             res2['sh'] = res2['sh'] + new_sh2
 
+            # Memory update
             cur_v = self.encode_cur_value(res1, dec1, pos1, shape1)
-
             if self.training:
                 sp_mem.add_mem(feat_k1, cur_v + feat_k1)
             else:
                 sp_mem.add_mem_check(feat_k1, cur_v + feat_k1)
 
+            # Prepare preds
             res2['pts3d_in_other_view'] = res2.pop('pts3d')
-            res2['means_in_other_view'] = res2.pop('means')
 
             if preds is None:
                 preds = [res1]
                 preds_all = [(res1, res2)]
             else:
                 res1['pts3d_in_other_view'] = res1.pop('pts3d')
-                res1['means_in_other_view'] = res1.pop('means')
                 preds.append(res1)
                 preds_all.append((res1, res2))
 
@@ -169,48 +156,45 @@ class InGaS(Spann3R):
 
         if return_memory:
             return preds, preds_all, sp_mem
-
         return preds, preds_all
 
-    def render_frames(self, batch, device):
+    def render_predictions(self, context_views, target_views, device):
         """
-        Consolidates the logic to render frames from a given batch.
-
-        Args:
-            batch (list): Batch of frames (each element is a dict with keys like 'img', 'camera_pose', 'camera_intrinsics', etc.)
-            device (torch.device): The device on which to perform computations.
-
+        Given context and target views, run model forward, compute gaussian splats,
+        and render the predicted images for target views.
         Returns:
-            color (torch.Tensor): The rendered frames of shape [B, V, C, H, W].
-            context_views (list): The extracted context views.
-            target_views (list): The extracted target views.
+            predicted_color: tensor [B, T, C, H, W]
+            preds_all: the detailed predictions structure
         """
-        # Extract context and target views
-        context_views = batch[1:-1]
-        target_views = [batch[1]] + [batch[len(batch) // 2]] + [batch[-1]]
-        _, preds_all = self.forward(context_views)
+        # Forward pass through model using context + target (for the sequential nature)
+        # We assume all frames together: context then target
+        with torch.no_grad() if not self.training else torch.enable_grad():
+            preds, preds_all = self(context_views)
 
-        # Compute necessary parameters
-        _, combined_pr_pts, gt_factor, _, _, _ = self.get_all_means(context_views, preds_all)
+        # Compute all necessary attributes from preds_all
+        gt_pts, combined_pr_pts, gt_factor, pr_factor, valids, _ = self.get_all_means(context_views, preds_all)
         pred_sh = self.get_all_sh(preds_all)
         pred_opacities = self.get_all_opacities(preds_all)
         pred_rotations = self.get_all_rotations(preds_all)
         pred_scales = self.get_all_scales(preds_all)
-        pred_offsets = self.get_all_offsets(preds_all)
 
-        # Get height and width from the first context view
-        _, _, h, w = context_views[0]['img'].shape
+        # We now need to compute extrinsics/intrinsics for target poses and render
+        _, _, h, w = target_views[0]['img'].shape
 
         base_pose = adjust_extrinsic_matrix(context_views[0]['camera_pose'], gt_factor)
         inv_base_pose = torch.inverse(base_pose)
 
+        # Create extrinsics for target views
         target_extrinsics = inv_base_pose[:, None, :, :] @ adjust_extrinsic_matrix(
-            torch.stack([t['camera_pose'] for t in target_views], dim=1), gt_factor)
-        context_extrinsics = inv_base_pose[:, None, :, :] @ adjust_extrinsic_matrix(
-            torch.stack([c['camera_pose'] for c in context_views], dim=1), gt_factor)
+            torch.stack([tv['camera_pose'] for tv in target_views], dim=1), gt_factor
+        )
 
-        target_intrinsics = torch.stack([t['camera_intrinsics'] for t in target_views], dim=1)
-        context_intrinsics = torch.stack([c['camera_intrinsics'] for c in context_views], dim=1)
+        context_extrinsics = inv_base_pose[:, None, :, :] @ adjust_extrinsic_matrix(
+            torch.stack([cv['camera_pose'] for cv in context_views], dim=1), gt_factor
+        )
+
+        target_intrinsics = torch.stack([tv['camera_intrinsics'] for tv in target_views], dim=1)
+        context_intrinsics = torch.stack([cv['camera_intrinsics'] for cv in context_views], dim=1)
 
         harmonics = pred_sh['average']
         context_camera_rotations = context_extrinsics[..., :3, :3]
@@ -218,80 +202,138 @@ class InGaS(Spann3R):
 
         rotations = pred_rotations["average"]
         scales = pred_scales["average"]
-        scales = 5.0 + (50.0 - 5.0) * scales
+        scales = 50.0 * scales
 
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
-        multiplier = get_scale_multiplier(context_intrinsics, pixel_size, 0.5)
-        means = combined_pr_pts["average"] + pred_offsets["average"]
-        scales = scales * multiplier[..., None, None, None]
+        multiplier = get_scale_multiplier(context_intrinsics, pixel_size, 0.2) 
+        means = combined_pr_pts["average"]
+        scales = scales * multiplier[..., None, None, None] / pr_factor.view(-1)
+
         covariances = build_covariance(scales, rotations)
-        covariances = context_camera_rotations[..., None, None, :, :] @ covariances @ \
-                      context_camera_rotations[..., None, None, :, :].transpose(-1, -2)
+        covariances = context_camera_rotations[..., None, None, :, :] @ covariances @ context_camera_rotations[..., None, None, :, :].transpose(-1, -2)
+
         opacities = pred_opacities['average']
+        # Render
+        color, freq = self.decoder(
+            target_extrinsics, target_intrinsics,
+            means, harmonics, 
+            covariances, opacities,
+            (h, w)
+        )
 
-        color, _ = self.decoder(target_extrinsics, target_intrinsics, means, harmonics, covariances, opacities, (h, w))
+        return color, freq, opacities, preds_all
 
-        return color, preds_all, context_views, target_views
-
-    def calculate_loss(self, context_views, target_views, preds_all, color, mask, apply_mask=True, average_over_mask=True, calculate_ssim=False):
+    def calculate_loss(self, context_views, target_views, preds_all, predicted_color, splat_freq, predicted_opacity, mask,
+                    apply_mask=True, average_over_mask=True, use_frequency_weighting=True, calculate_ssim=False, epsilon=1e-8):
         """
-        Calculate the loss (MSE, LPIPS, optionally SSIM and Spann3r loss).
-
-        Args:
-            context_views (list): The context frames used to produce predictions.
-            target_views (list): The target frames.
-            preds_all (list): All predictions from the forward pass.
-            color (torch.Tensor): The rendered frames [B, V, C, H, W].
-            mask (torch.Tensor): The mask indicating valid pixels.
-            apply_mask (bool): Whether to mask the loss computation.
-            average_over_mask (bool): Whether to average the loss only over masked pixels.
-            calculate_ssim (bool): Whether to compute SSIM as well.
-
-        Returns:
-            loss, mse_loss, lpips_loss, (ssim_val if calculate_ssim=True)
+        Calculate the losses (MSE, LPIPS, optional Spann3r loss, SSIM), with optional frequency-based weighting.
+        If `use_frequency_weighting` is False, frequency-based weighting will be skipped.
         """
-        target_color = torch.stack([view['original_img'] for view in target_views], dim=1)
-        predicted_color = color
 
+        # Extract target colors
+        target_color = torch.stack([view['original_img'] for view in target_views], dim=1)  # (b, v, c, h, w)
+
+        # Apply mask if requested
         if apply_mask:
-            target_color = target_color * mask[..., None, :, :]
-            predicted_color = predicted_color * mask[..., None, :, :]
+            target_color = target_color * mask[..., None, :, :]         # (b, v, c, h, w)
+            predicted_color = predicted_color * mask[..., None, :, :]   # (b, v, c, h, w)
+            predicted_opacity = predicted_opacity * mask[..., None]      # (b, v, h, w)
 
+        # Rearrange tensors for loss computations
         flattened_color = einops.rearrange(predicted_color, 'b v c h w -> (b v) c h w')
         flattened_target_color = einops.rearrange(target_color, 'b v c h w -> (b v) c h w')
         flattened_mask = einops.rearrange(mask, 'b v h w -> (b v) h w')
 
-        rgb_l2_loss = (flattened_color - flattened_target_color) ** 2
-        if average_over_mask:
-            mse_loss = (rgb_l2_loss * flattened_mask[:, None, ...]).sum() / flattened_mask.sum()
+        if use_frequency_weighting:
+            # Frequency-based weighting
+            # splat_freq: (b, v, c, h, w)
+            # Compute weights = 1.0 / (freq + epsilon), and set them to 0 if freq=0
+            weight_map = 1.0 / (splat_freq + epsilon)
+            weight_map[splat_freq == 0] = 0.0
+
+            flattened_weight = einops.rearrange(weight_map, 'b v c h w -> (b v) c h w')
         else:
-            mse_loss = rgb_l2_loss.mean()
+            # No frequency weighting: use uniform weights of 1.0 for all valid pixels
+            flattened_weight = torch.ones_like(flattened_color, dtype=flattened_color.dtype, device=flattened_color.device)
+            # If we are applying a mask, we only include masked pixels
+            if apply_mask:
+                flattened_weight = flattened_weight * flattened_mask[:, None, ...]
 
-        lpips_loss = self.lpips_criterion(flattened_target_color, flattened_color, normalize=True)
-        if average_over_mask:
-            lpips_loss = (lpips_loss * flattened_mask[:, None, ...]).sum() / flattened_mask.sum()
+        # ============ MSE Loss ============
+        rgb_l2_loss = (flattened_color - flattened_target_color) ** 2  # (b*v, c, h, w)
+
+        if apply_mask and average_over_mask and not use_frequency_weighting:
+            # Original mask-based averaging (no frequency weighting)
+            numerator = (rgb_l2_loss * flattened_mask[:, None, ...]).sum()
+            denominator = flattened_mask.sum() + epsilon
+            mse_loss = numerator / denominator
         else:
-            lpips_loss = lpips_loss.mean()
+            # With frequency weighting or no averaging just rely on weighted sum
+            numerator = (rgb_l2_loss * flattened_weight).sum()
+            denominator = flattened_weight.sum() + epsilon
+            mse_loss = numerator / denominator
 
-        loss = self.config.mse_loss_weight * mse_loss + self.config.lpips_loss_weight * lpips_loss
+        # ============ LPIPS Loss ============
+        lpips_loss_map = self.lpips_criterion(flattened_target_color, flattened_color, normalize=True)  # (b*v, c, h, w)
 
+        if apply_mask and average_over_mask and not use_frequency_weighting:
+            # Original mask-based averaging (no frequency weighting)
+            numerator = (lpips_loss_map * flattened_mask[:, None, ...]).sum()
+            denominator = flattened_mask.sum() + epsilon
+            lpips_loss = numerator / denominator
+        else:
+            # With frequency weighting or no averaging just rely on weighted sum
+            numerator = (lpips_loss_map * flattened_weight).sum()
+            denominator = flattened_weight.sum() + epsilon
+            lpips_loss = numerator / denominator
+
+        # Combine weighted losses
+        loss = self.config.mse_loss_weight * mse_loss + \
+            self.config.lpips_loss_weight * lpips_loss
+
+        # ============ Opacity Regularization ============
+        opacity_reg_loss = None
+        if self.config.opacity_reg_weight is not None:
+            # Opacity regularization is independent of frequency weighting,
+            # though if desired, you could also weight it similarly.
+            # For now, leave it as is.
+            if apply_mask:
+                # Only consider masked regions if needed
+                masked_opacity = predicted_opacity * mask[..., None]
+                opacity_reg_loss = torch.abs(masked_opacity).mean()
+            else:
+                opacity_reg_loss = torch.abs(predicted_opacity).mean()
+            loss += self.config.opacity_reg_weight * opacity_reg_loss
+
+        # ============ Optional Spann3r Loss ============
+        spann3r_loss = None
         if self.config.spann3r_loss_weight is not None:
-            spann3r_loss = self.spann3r_criterion.compute_frame_loss(context_views, preds_all)
+            # Compute Spann3r loss. If it provides a spatial map, you could apply weighting similarly.
+            spann3r_loss, _, _ = self.spann3r_criterion.compute_frame_loss(context_views, preds_all)
             loss += self.config.spann3r_loss_weight * spann3r_loss
 
+        # ============ SSIM (Optional) ============
+        ssim_val = None
         if calculate_ssim:
-            if average_over_mask:
-                ssim_val = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=True)
-                ssim_val = (ssim_val * flattened_mask[:, None, ...]).sum() / flattened_mask.sum()
+            ssim_map = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=False)  # (b*v, c, h, w)
+            if apply_mask and average_over_mask and not use_frequency_weighting:
+                # Original mask-based averaging
+                numerator = (ssim_map * flattened_mask[:, None, ...]).sum()
+                denominator = flattened_mask.sum() + epsilon
+                ssim_val = numerator / denominator
             else:
-                ssim_val = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=False)
-                ssim_val = ssim_val.mean()
-            return loss, mse_loss, lpips_loss, ssim_val
+                # Frequency weighting or no special averaging
+                numerator = (ssim_map * flattened_weight).sum()
+                denominator = flattened_weight.sum() + epsilon
+                ssim_val = numerator / denominator
 
-        return loss, mse_loss, lpips_loss
+        return loss, mse_loss, lpips_loss, opacity_reg_loss, spann3r_loss, ssim_val
 
     @staticmethod
     def get_all_means(gts, preds, norm_mode='avg_dis', fix_first=False, dist_clip=None, gt_scale=False):
+        """
+        Computes normalized points and cameras.
+        """
         in_camera1 = inv(gts[0]['camera_pose'])
 
         gt_pts = []
@@ -303,21 +345,19 @@ class InGaS(Spann3R):
         for i, gt in enumerate(gts):
             gt_pts.append(geotrf(in_camera1, gt['pts3d']))
             valid = gt['valid_mask'].clone()
-
             if dist_clip is not None:
                 dis = gt['pts3d'].norm(dim=-1)
                 valid = valid & (dis <= dist_clip)
             valids.append(valid)
 
             if i != num_frames - 1:
-                pred_left = get_pred_means(preds[i][0], use_pose=(i != 0))
+                pred_left = get_pred_pts3d(gts, preds[i][0], use_pose=(i != 0))
                 pr_pts_l.append(pred_left)
             if i != 0:
-                pred_right = get_pred_means(preds[i-1][1], use_pose=(i != 0))
+                pred_right = get_pred_pts3d(gts, preds[i - 1][1], use_pose=(i != 0))
                 pr_pts_r.append(pred_right)
 
         pr_pts = (pr_pts_l, pr_pts_r)
-
         if norm_mode:
             pr_pts, pr_factor = normalize_pointcloud_t(pr_pts, norm_mode, valids, fix_first=fix_first, gt=False)
         else:
@@ -329,9 +369,7 @@ class InGaS(Spann3R):
             gt_factor = None
 
         pr_pts_l, pr_pts_r = pr_pts
-        pr_pts_avg_normalized = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 2)
-        ] + [pr_pts_r[-1]]
+        pr_pts_avg_normalized = [pr_pts_l[0]] + [CustomMeanFunction.apply(pr_pts_l[i+1], pr_pts_r[i]) for i in range(num_frames - 2)] + [pr_pts_r[-1]]
         pr_pts_avg_normalized = torch.stack(pr_pts_avg_normalized, dim=1)
 
         combined_pr_pts = {
@@ -347,95 +385,36 @@ class InGaS(Spann3R):
         num_frames = len(preds)
         pr_pts_l = [preds[i][0]['sh'] for i in range(num_frames)]
         pr_pts_r = [preds[i][1]['sh'] for i in range(num_frames)]
-        pr_pts_avg = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
-        ] + [pr_pts_r[-1]]
-
+        pr_pts_avg = [pr_pts_l[0]] + [CustomMeanFunction.apply(pr_pts_l[i+1], pr_pts_r[i]) for i in range(num_frames - 1)] + [pr_pts_r[-1]]
         pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
-        combined_pr_pts = {
-            'left': pr_pts_l,
-            'right': pr_pts_r,
-            'average': pr_pts_avg
-        }
-
-        return combined_pr_pts
-    
-    @staticmethod
-    def get_all_offsets(preds):
-        num_frames = len(preds)
-        pr_pts_l = [preds[i][0]['offsets'] for i in range(num_frames)]
-        pr_pts_r = [preds[i][1]['offsets'] for i in range(num_frames)]
-        pr_pts_avg = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
-        ] + [pr_pts_r[-1]]
-
-        pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
-        pr_pts_avg = reg_dense_offsets(pr_pts_avg)
-        combined_pr_pts = {
-            'left': pr_pts_l,
-            'right': pr_pts_r,
-            'average': pr_pts_avg
-        }
-
-        return combined_pr_pts
-
+        return {'left': pr_pts_l, 'right': pr_pts_r, 'average': pr_pts_avg}
 
     @staticmethod
     def get_all_scales(preds):
         num_frames = len(preds)
         pr_pts_l = [preds[i][0]['scales'] for i in range(num_frames)]
         pr_pts_r = [preds[i][1]['scales'] for i in range(num_frames)]
-        pr_pts_avg = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
-        ] + [pr_pts_r[-1]]
-
+        pr_pts_avg = [pr_pts_l[0]] + [CustomMeanFunction.apply(pr_pts_l[i+1], pr_pts_r[i]) for i in range(num_frames - 1)] + [pr_pts_r[-1]]
         pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
         pr_pts_avg = reg_dense_scales(pr_pts_avg)
-
-        combined_pr_pts = {
-            'left': pr_pts_l,
-            'right': pr_pts_r,
-            'average': pr_pts_avg
-        }
-
-        return combined_pr_pts
+        return {'left': pr_pts_l, 'right': pr_pts_r, 'average': pr_pts_avg}
 
     @staticmethod
     def get_all_rotations(preds):
         num_frames = len(preds)
         pr_pts_l = [preds[i][0]['rotations'] for i in range(num_frames)]
         pr_pts_r = [preds[i][1]['rotations'] for i in range(num_frames)]
-        pr_pts_avg = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
-        ] + [pr_pts_r[-1]]
+        pr_pts_avg = [pr_pts_l[0]] + [CustomMeanFunction.apply(pr_pts_l[i+1], pr_pts_r[i]) for i in range(num_frames - 1)] + [pr_pts_r[-1]]
         pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
-
         pr_pts_avg = reg_dense_rotation(pr_pts_avg)
-
-        combined_pr_pts = {
-            'left': pr_pts_l,
-            'right': pr_pts_r,
-            'average': pr_pts_avg
-        }
-
-        return combined_pr_pts
+        return {'left': pr_pts_l, 'right': pr_pts_r, 'average': pr_pts_avg}
 
     @staticmethod
     def get_all_opacities(preds):
         num_frames = len(preds)
         pr_pts_l = [preds[i][0]['opacities'] for i in range(num_frames)]
         pr_pts_r = [preds[i][1]['opacities'] for i in range(num_frames)]
-        pr_pts_avg = [pr_pts_l[0]] + [
-            (pr_pts_l[i + 1] + pr_pts_r[i]) / 2 for i in range(num_frames - 1)
-        ] + [pr_pts_r[-1]]
-
+        pr_pts_avg = [pr_pts_l[0]] + [CustomMeanFunction.apply(pr_pts_l[i+1], pr_pts_r[i]) for i in range(num_frames - 1)] + [pr_pts_r[-1]]
         pr_pts_avg = torch.stack(pr_pts_avg, dim=1)
         pr_pts_avg = reg_dense_opacities(pr_pts_avg)
-
-        combined_pr_pts = {
-            'left': pr_pts_l,
-            'right': pr_pts_r,
-            'average': pr_pts_avg
-        }
-
-        return combined_pr_pts
+        return {'left': pr_pts_l, 'right': pr_pts_r, 'average': pr_pts_avg}
