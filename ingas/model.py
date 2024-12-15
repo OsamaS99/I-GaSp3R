@@ -156,6 +156,8 @@ class InGaS(Spann3R):
             res2['pts3d_in_other_view'] = res2.pop('pts3d')
             res2['means_in_other_view'] = res2.pop('means')
 
+            if res1 is None:
+                raise ValueError('res1 is None')
             if preds is None:
                 preds = [res1]
                 preds_all = [(res1, res2)]
@@ -186,8 +188,9 @@ class InGaS(Spann3R):
             target_views (list): The extracted target views.
         """
         # Extract context and target views
-        context_views = batch[1:-1]
-        target_views = [batch[1]] + [batch[len(batch) // 2]] + [batch[-1]]
+        target_indices = [1, len(batch)-2]  # Second and second-to-last indices
+        target_views = [batch[i] for i in target_indices]
+        context_views = [batch[i] for i in range(len(batch)) if i not in target_indices]
         _, preds_all = self.forward(context_views)
 
         # Compute necessary parameters
@@ -218,7 +221,7 @@ class InGaS(Spann3R):
 
         rotations = pred_rotations["average"]
         scales = pred_scales["average"]
-        scales = 5.0 + (50.0 - 5.0) * scales
+        scales = 50.0 + (50.0 - 5.0) * scales
 
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
         multiplier = get_scale_multiplier(context_intrinsics, pixel_size, 0.5)

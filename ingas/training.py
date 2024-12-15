@@ -91,10 +91,11 @@ def get_args_parser():
 
     # Datasets (adjust these based on your actual dataset setup)
     parser.add_argument('--train_dataset', type=str,
-                       default="Scannetpp(split='train', ROOT='/mnt/hdd/scannetpp/data', resolution=224, transform=ImgNorm)")
+                       default="Scannetpp(split='train', ROOT='/mnt/hdd/scannetpp/data', num_seq=100,kf_every=10, resolution=224, seed=777, transform=ImgNorm)")
+    #parser.add_argument('--val_dataset', type=str,
+     #                  default="Scannetpp(split='val', ROOT='/mnt/hdd/scannetpp/data', resolution=224, num_seq=1, kf_every=10, seed=777, full_video=True)")
     parser.add_argument('--val_dataset', type=str,
-                       default="Scannetpp(split='val', ROOT='/mnt/hdd/scannetpp/data', resolution=224, num_seq=1, kf_every=10, seed=777, full_video=True)")
-
+                       default="Scannetpp(split='val', ROOT='/mnt/hdd/scannetpp/data', resolution=224, num_seq=1, kf_every=10, seed=777, full_video=False)")
     # Experiment parameters
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--output_dir', type=str, default='./output')
@@ -102,16 +103,16 @@ def get_args_parser():
 
     # Training Hyperparameters
     parser.add_argument('--batch_size', default=1, type=int)
-    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--weight_decay', type=float, default=0.05)
     parser.add_argument('--gradient_clip_val', type=float, default=0.5)
     parser.add_argument('--warmup_epochs', type=int, default=10)
-    parser.add_argument('--eval_freq', type=int, default=5)
-    parser.add_argument('--save_freq', type=int, default=5)
+    parser.add_argument('--eval_freq', type=int, default=1)
+    parser.add_argument('--save_freq', type=int, default=1)
     parser.add_argument('--print_freq', type=int, default=10)
     parser.add_argument('--accum_iter', default=16, type=int)
-    parser.add_argument('--num_workers', default=1, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
 
     # Loss Parameters
     parser.add_argument('--apply_mask', action='store_false')
@@ -229,37 +230,57 @@ def validate(model, data_loader, device, epoch, args, visualizer):
     model.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = f'Validation Epoch: [{epoch}]'
+    
+    # Add torch.cuda.empty_cache() at the start of validation
+    torch.cuda.empty_cache()
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
-            batch = process_batch(batch, device)
+            try:
+                # Process smaller batches during validation
+                if args.batch_size > 1:
+                    # Split the batch into smaller chunks
+                    for key in batch:
+                        batch[key] = batch[key][:1]  # Process only first item in batch
+                
+                batch = process_batch(batch, device)
 
-            color, preds_all, context_views, target_views = model.render_frames(batch, device)
+                # Clear cache before heavy operations
+                torch.cuda.empty_cache()
+                
+                color, preds_all, context_views, target_views = model.render_frames(batch, device)
+                
+                mask = loss_mask.calculate_loss_mask(target_views, context_views)
+                loss, mse_loss, lpips_loss, ssim_val = model.calculate_loss(
+                    context_views, target_views, preds_all, color, mask,
+                    apply_mask=args.apply_mask,
+                    average_over_mask=args.average_over_mask,
+                    calculate_ssim=True
+                )
 
-            mask = loss_mask.calculate_loss_mask(target_views, context_views)
-            loss, mse_loss, lpips_loss, ssim_val = model.calculate_loss(
-                context_views, target_views, preds_all, color, mask,
-                apply_mask=args.apply_mask,
-                average_over_mask=args.average_over_mask,
-                calculate_ssim=True
-            )
+                if args.rank == 0:
+                    global_step = epoch * len(data_loader) + batch_idx
+                    visualizer.log_metric('val/loss', loss.item(), global_step)
+                    visualizer.log_metric('val/mse', mse_loss.item(), global_step)
+                    visualizer.log_metric('val/lpips', lpips_loss.item(), global_step)
+                    visualizer.log_metric('val/ssim', ssim_val.item(), global_step)
 
-            if args.rank == 0:
-                global_step = epoch * len(data_loader) + batch_idx
-                visualizer.log_metric('val/loss', loss.item(), global_step)
-                visualizer.log_metric('val/mse', mse_loss.item(), global_step)
-                visualizer.log_metric('val/lpips', lpips_loss.item(), global_step)
-                visualizer.log_metric('val/ssim', ssim_val.item(), global_step)
+                    if batch_idx == 0:
+                        target_images = [view['img'][0].cpu() for view in target_views]
+                        visualizer.log_gif_images('val/target_frames', target_images, global_step, fps=2)
 
-                if batch_idx == 0:
-                    target_images = [view['img'][0].cpu() for view in target_views]
-                    visualizer.log_gif_images('val/target_frames', target_images, global_step, fps=2)
+                        rendered_images = [color[0, i].cpu() for i in range(color.shape[1])]
+                        visualizer.log_gif_images('val/rendered_frames', rendered_images, global_step, fps=2)
 
-                    rendered_images = [color[0, i].cpu() for i in range(color.shape[1])]
-                    visualizer.log_gif_images('val/rendered_frames', rendered_images, global_step, fps=2)
+                        visualizer.flush(global_step)
 
-                    visualizer.flush(global_step)
+                metric_logger.update(loss=loss.item(), mse=mse_loss.item(), lpips=lpips_loss.item(), ssim=ssim_val.item())
 
-            metric_logger.update(loss=loss.item(), mse=mse_loss.item(), lpips=lpips_loss.item(), ssim=ssim_val.item())
+            except torch.cuda.OutOfMemoryError:
+                # Handle OOM gracefully
+                torch.cuda.empty_cache()
+                print(f"WARNING: Out of memory in validation batch {batch_idx}. Skipping batch.")
+                continue
 
     metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
@@ -303,15 +324,30 @@ def main(args):
             model, device_ids=[args.gpu], find_unused_parameters=True
         )
 
-    # Setup data loaders (Assuming build_dataset returns a PyTorch DataLoader)
+    # Setup data loaders
     data_loader_train = build_dataset(args.train_dataset, test=False, num_workers=args.num_workers, batch_size=args.batch_size)
     data_loader_val = build_dataset(args.val_dataset, test=True, num_workers=args.num_workers, batch_size=args.batch_size)
+    
+    # Initialize train_ratio for both datasets
+    data_loader_val.dataset.train_ratio = 0.5    # Fixed ratio for validation
+    
+    params_with_standard_lr = []
+    params_with_reduced_lr = []
+    # Iterate through all named parameters in the model
+    for name, param in model.named_parameters():
+        # Exclude parameters containing "lpips" and ensure they require gradients
+        if "lpips" not in name and param.requires_grad:
+            if "gaussian_dpt.dpt" in name:
+                params_with_standard_lr.append(param)
+            else:
+                params_with_reduced_lr.append(param)
 
-    # Initialize optimizer and schedulers
+    # Optimizer and Scheduler
     optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr,
-        weight_decay=args.weight_decay
+        [
+            {'params': params_with_standard_lr, 'lr': args.lr},
+            {'params': params_with_reduced_lr, 'lr': 0.1 * args.lr}
+        ],
     )
 
     scheduler = MultiStepLR(
@@ -331,7 +367,7 @@ def main(args):
         if args.rank == 0:
             print(f"Resuming from checkpoint: {latest_checkpoint}")
 
-        checkpoint = torch.load(latest_checkpoint, map_location='cpu')
+        checkpoint = torch.load(latest_checkpoint, map_location=device)
         if args.distributed:
             model.module.load_state_dict(checkpoint['model'])
         else:
@@ -342,22 +378,26 @@ def main(args):
         if 'loss_scaler' in checkpoint:
             loss_scaler.load_state_dict(checkpoint['loss_scaler'])
 
+        del checkpoint
+
     # Training loop
     print(f"Start training for {args.epochs} epochs")
     for epoch in range(start_epoch, args.epochs):
         try:
             if hasattr(data_loader_train.dataset, 'set_epoch'):
                 data_loader_train.dataset.set_epoch(epoch)
-            max_ratio = 0.75
-            min_ratio = 0.3
+            max_ratio = 0.8
+            min_ratio = 0.5
 
             if args.epochs > 1:
                 current_epoch = epoch - start_epoch
                 progress = current_epoch / (args.epochs - 1)
                 ratio = max_ratio - progress * (max_ratio - min_ratio)
             else:
-                ratio = min_ratio  # or max_ratio, depending on your preference
+                ratio = min_ratio
 
+            # Update ratio for training dataset only
+            data_loader_train.dataset.train_ratio = ratio
             data_loader_train.dataset.set_ratio(ratio)
 
             train_stats = train_one_epoch(
@@ -371,16 +411,16 @@ def main(args):
                 visualizer=visualizer if args.rank == 0 else None
             )
 
-            # val_stats = {}
-            # if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
-            #     val_stats = validate(
-            #         model=model,
-            #         data_loader=data_loader_val,
-            #         device=device,
-            #         epoch=epoch,
-            #         args=args,
-            #         visualizer=visualizer if args.rank == 0 else None
-            #     )
+            val_stats = {}
+            if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
+                val_stats = validate(
+                    model=model,
+                    data_loader=data_loader_val,
+                    device=device,
+                    epoch=epoch,
+                    args=args,
+                    visualizer=visualizer if args.rank == 0 else None
+                )
 
             # Update learning rate
             scheduler.step()
@@ -388,7 +428,42 @@ def main(args):
             # Save checkpoint
             if args.rank == 0 and args.output_dir:
                 checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch}.pth')
-                model_state = model.module.state_dict() if args.distributed else model.state_dict()
+                
+                # Get model state dict
+                if args.distributed:
+                    model_state = model.module.state_dict()
+                else:
+                    model_state = model.state_dict()
+                
+                # Specifically check for gaussian_dpt keys
+                gaussian_dpt_keys = [k for k in model_state.keys() 
+                                   if 'downstream_head' in k and 'gaussian_dpt' in k]
+                
+                print("\nCheckpoint Verification:")
+                print(f"Total number of model keys: {len(model_state.keys())}")
+                print(f"Number of Gaussian DPT keys: {len(gaussian_dpt_keys)}")
+                
+                if gaussian_dpt_keys:
+                    print("\nFound Gaussian DPT keys:")
+                    for k in gaussian_dpt_keys:
+                        print(f"- {k}")
+                else:
+                    print("\nWARNING: No Gaussian DPT keys found! Attempting to explicitly save them...")
+                    
+                    # Explicitly extract and save Gaussian DPT weights
+                    if args.distributed:
+                        model_ref = model.module
+                    else:
+                        model_ref = model
+                        
+                    for head_idx in [1, 2]:
+                        head = getattr(model_ref.dust3r, f'downstream_head{head_idx}')
+                        if hasattr(head, 'gaussian_dpt'):
+                            gaussian_state = head.gaussian_dpt.state_dict()
+                            prefix = f'dust3r.downstream_head{head_idx}.gaussian_dpt.'
+                            model_state.update({prefix + k: v for k, v in gaussian_state.items()})
+                            print(f"Added weights for downstream_head{head_idx}.gaussian_dpt")
+
                 save_obj = {
                     'model': model_state,
                     'optimizer': optimizer.state_dict(),
@@ -396,6 +471,14 @@ def main(args):
                     'args': args,
                     'loss_scaler': loss_scaler.state_dict(),
                 }
+                
+                # Final verification after potential additions
+                final_gaussian_keys = [k for k in model_state.keys() 
+                                     if 'downstream_head' in k and 'gaussian_dpt' in k]
+                print(f"\nFinal checkpoint state:")
+                print(f"Total keys: {len(model_state.keys())}")
+                print(f"Gaussian DPT keys: {len(final_gaussian_keys)}")
+                
                 torch.save(save_obj, checkpoint_path)
 
                 # Remove old checkpoints to save space (keep last 3)
@@ -409,8 +492,8 @@ def main(args):
                     'lr': optimizer.param_groups[0]['lr'],
                     **{f'train_{k}': v for k, v in train_stats.items()}
                 }
-                # if val_stats:
-                #     epoch_summary.update({f'val_{k}': v for k, v in val_stats.items()})
+                if val_stats:
+                    epoch_summary.update({f'val_{k}': v for k, v in val_stats.items()})
 
                 if args.use_wandb:
                     wandb.log(epoch_summary)
