@@ -239,8 +239,7 @@ class InGaS(Spann3R):
         if apply_mask:
             target_color = target_color * mask[..., None, :, :]         # (b, v, c, h, w)
             predicted_color = predicted_color * mask[..., None, :, :]   # (b, v, c, h, w)
-            predicted_opacity = predicted_opacity * mask[..., None]      # (b, v, h, w)
-
+            
         # Flatten (b,v) -> (b*v)
         flattened_color = einops.rearrange(predicted_color, 'b v c h w -> (b v) c h w')  # (b*v,c,h,w)
         flattened_target_color = einops.rearrange(target_color, 'b v c h w -> (b v) c h w')  # (b*v,c,h,w)
