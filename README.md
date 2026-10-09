@@ -1,3 +1,32 @@
+# I-GaSp3R: Incremental Gaussian Splatting for 3D Reconstruction
+
+**Tobias Steinle, Osama Salem** — Technical University of Munich
+(ADL4CV course project, supervised by Lukas Höllein and Prof. Matthias Nießner)
+
+[Project page](https://osamas99.github.io/projects/i-gasp3r/) ·
+[Report (PDF)](https://osamas99.github.io/assets/files/i-gasp3r/I-GaSp3R_report.pdf) ·
+[Poster (PDF)](https://osamas99.github.io/assets/files/i-gasp3r/I-GaSp3R_poster.pdf)
+
+I-GaSp3R is a pose-free, feed-forward pipeline that incrementally reconstructs 3D Gaussians from
+unposed image sequences. It combines the spatial memory of [Spann3R](https://github.com/HengyiWang/spann3r)
+with a Gaussian head in the style of [Splatt3R](https://github.com/btsmart/splatt3r), and is trained with a masked
+photometric loss, a temporal-consistency loss, confidence weighting and frequency-based gradient normalization.
+It runs at 21 FPS on a single RTX 3080.
+
+The I-GaSp3R-specific code lives in `ingas/` (model, training, utilities), `train.py`, `evaluate.py`,
+`evaluate_differnt_num_context.py` and `utils/`.
+
+## Acknowledgements and licences
+
+This repository is built on top of the [Spann3R](https://github.com/HengyiWang/spann3r) codebase, which in turn builds
+on [DUSt3R](https://github.com/naver/dust3r) and [CroCo](https://github.com/naver/croco); the Gaussian rasterization
+utilities in `pixelsplat/` come from [pixelSplat](https://github.com/dcharatan/pixelsplat).
+Please respect the licences of these projects (e.g. `croco/LICENSE`) when using this code.
+
+---
+
+*The original Spann3R README follows.*
+
 # 3D Reconstruction with Spatial Memory
 
 ### [Paper](https://arxiv.org/abs/2408.16061) | [Project Page](https://hengyiwang.github.io/projects/spanner) | [Video](https://hengyiwang.github.io/projects/spanner/videos/spanner_intro.mp4)
